@@ -1,0 +1,120 @@
+# This file is used to ignore files which are generated
+# ----------------------------------------------------------------------------
+
+*~
+*.autosave
+*.a
+*.core
+*.moc
+*.o
+*.obj
+*.orig
+*.rej
+*.so
+*.so.*
+*_pch.h.cpp
+*_resource.rc
+*.qm
+.#*
+*.*#
+core
+!core/
+tags
+.DS_Store
+.directory
+*.debug
+Makefile*
+*.prl
+*.app
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+Thumbs.db
+*.res
+*.rc
+# 例外：桌面端 exe 的版本信息资源必须入库，否则新鲜克隆无法构建
+# （原先位于 src/desktop/app.rc，随架构调整迁至 src/interface/gui/app.rc）
+!src/interface/gui/app.rc
+/.qmake.cache
+/.qmake.stash
+**/.qmlls.ini
+
+# qtcreator generated files
+*.pro.user*
+*.qbs.user*
+CMakeLists.txt.user*
+
+# xemacs temporary files
+*.flc
+
+# Vim temporary files
+.*.swp
+
+# Visual Studio generated files
+*.ib_pdb_index
+*.idb
+*.ilk
+*.pdb
+*.sln
+*.suo
+*.vcproj
+*vcproj.*.*.user
+*.ncb
+*.sdf
+*.opensdf
+*.vcxproj
+*vcxproj.*
+
+# MinGW generated files
+*.Debug
+*.Release
+
+# Python byte code
+*.pyc
+
+# Binaries
+# --------
+*.dll
+*.exe
+
+# Directories with generated files
+.moc/
+.obj/
+.pch/
+.rcc/
+.uic/
+/build*/
+/.qtcreator/
+
+# 部署产物（windeployqt 输出、临时诊断脚本、打包 zip）
+/deploy/
+*_windeploy.log
+msm.log
+
+# 构建日志与本地环境文件
+*.log
+local.properties
+
+# 远控端构建产物（Android / iOS）
+src/interface/remote/android/**/build/
+src/interface/remote/android/.gradle/
+src/interface/remote/android/local.properties
+src/interface/remote/android/*_log.txt
+src/interface/remote/ios/**/build/
+src/interface/remote/ios/*.xcodeproj/
+src/interface/remote/ios/*.xcworkspace/
+src/interface/remote/ios/Pods/
+src/interface/remote/ios/DerivedData/
+
+# 根目录构建日志（txt 后缀，*.log 不覆盖）
+/build_log.txt
+
+# 运行时日志目录
+/logs/
+
+# 旧版原生远控端（仅本地备查，不纳入版本库）
+/_legacy_remote_native/
+
+# 会话导出与精简产物（体积大，仅本地备查）
+/history.json
+/history_split/

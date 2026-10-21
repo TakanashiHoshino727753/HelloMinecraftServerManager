@@ -1,0 +1,1338 @@
+﻿// ServerPage.qml —— 单个服务器的详情/管理页
+// 职责：展示实时状态、控制台输出、在线玩家、已装模组、server.properties 编辑，
+// 并提供指令集、快捷操作、世界管理、OP/封禁/白名单等常用管理动作。
+// 由 ServerCard 的“详情”按键打开；通过 serverController 订阅实时信号刷新。
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import MinecraftServerManager
+import "PropsNames.js" as PropsNames
+
+Item {
+    id: root
+    objectName: "ServerPageRoot"
+    property string serverName
+    property string serverVersion
+    property string serverType: ""
+    property string serverPath
+    property int serverIndex: -1
+
+    // 是否为模组服（目录含 mods/），决定是否显示“优化模组”入口
+    readonly property bool hasModsDir: serverPath ? serverController.pathExists(serverPath + "/mods") : false
+
+    // 本服当前是否存在活动异常（第5项：异常纠错跳转入口可见性）
+    property bool hasActiveError: serverPath ? computeActiveError() : false
+    function computeActiveError() {
+        if (!serverPath) return false;
+        var recs = serverController.errorRecords;
+        for (var i = 0; i < recs.length; ++i)
+            if (recs[i].path === root.serverPath) return true;
+        return false;
+    }
+    // 本服务器专属异常记录（第5项：服务器自己的纠错页）
+    property var myError: null
+    function refreshMyError() {
+        root.myError = null;
+        if (!serverPath) return;
+        var recs = serverController.errorRecords;
+        for (var i = 0; i < recs.length; ++i)
+            if (recs[i].path === root.serverPath) { root.myError = recs[i]; break; }
+    }
+    function errorTypeColor(t) {
+        if (t === "eula") return "#f0a020";
+        if (t === "io") return "#e0533d";
+        if (t === "heartbeat") return "#b060d0";
+        return "#e0533d";
+    }
+    Connections {
+        target: serverController
+        function onErrorRecordsChanged() {
+            root.hasActiveError = root.computeActiveError();
+            root.refreshMyError();
+        }
+    }
+
+    property bool running: false
+    property string statusText: running ? I18n.t("运行中", I18n.lang) : I18n.t("已停止", I18n.lang)
+    property date runningSince: new Date(0)
+    property string uptimeText: "—"
+    property real cpuVal: 0
+    property string cpuText: "—"
+    property string memText: "—"
+    property string tpsText: "—"
+
+    // 运维操作提示条（备份 / 更新结果等）
+    property string toastText: ""
+    property bool toastOk: true
+    function showToast(msg, ok) {
+        toastText = msg
+        toastOk = ok
+        toast.visible = true
+        toastTimer.restart()
+    }
+    // 一键更新弹窗数据
+    property string updateLatest: ""
+    property string updateUrl: ""
+
+    ListModel { id: consoleModel }
+    ListModel { id: modsModel }
+    ListModel { id: propsModel }
+    ListModel { id: playersModel }
+    ListModel { id: worldStateModel }
+
+    property bool worldQueryActive: false
+
+    // ================= 指令集 / 指令提示 / 快捷操作 数据 =================
+    readonly property var cmdCatalog: [
+        { cat: I18n.t("玩家", I18n.lang), items: [
+            { c: "gamemode <mode> <player>", d: I18n.t("设置玩家游戏模式", I18n.lang) },
+            { c: "tp <player> <target>", d: I18n.t("传送玩家到目标", I18n.lang) },
+            { c: "give <player> <item> [count]", d: I18n.t("给予玩家物品", I18n.lang) },
+            { c: "kill <player>", d: I18n.t("杀死实体/玩家", I18n.lang) },
+            { c: "op <player>", d: I18n.t("给予管理员权限", I18n.lang) },
+            { c: "deop <player>", d: I18n.t("撤销管理员权限", I18n.lang) },
+            { c: "kick <player> [reason]", d: I18n.t("踢出玩家", I18n.lang) },
+            { c: "ban <player> [reason]", d: I18n.t("封禁玩家", I18n.lang) },
+            { c: "pardon <player>", d: I18n.t("解封玩家", I18n.lang) },
+            { c: "whitelist add <player>", d: I18n.t("加入白名单", I18n.lang) },
+            { c: "whitelist remove <player>", d: I18n.t("移除白名单", I18n.lang) }
+        ]},
+        { cat: I18n.t("世界 / 环境", I18n.lang), items: [
+            { c: "time set day", d: I18n.t("设为白天", I18n.lang) },
+            { c: "time set night", d: I18n.t("设为夜晚", I18n.lang) },
+            { c: "weather clear", d: I18n.t("放晴", I18n.lang) },
+            { c: "weather rain", d: I18n.t("下雨", I18n.lang) },
+            { c: "weather thunder", d: I18n.t("雷暴", I18n.lang) },
+            { c: "difficulty <difficulty>", d: I18n.t("设置游戏难度", I18n.lang) },
+            { c: "gamerule keepInventory true", d: I18n.t("死亡保留物品", I18n.lang) },
+            { c: "gamerule doDaylightCycle false", d: I18n.t("停止昼夜循环", I18n.lang) },
+            { c: "worldborder set <size>", d: I18n.t("设置世界边界", I18n.lang) }
+        ]},
+        { cat: I18n.t("管理", I18n.lang), items: [
+            { c: "save-all", d: I18n.t("保存所有存档", I18n.lang) },
+            { c: "save-on", d: I18n.t("开启自动保存", I18n.lang) },
+            { c: "save-off", d: I18n.t("关闭自动保存", I18n.lang) },
+            { c: "stop", d: I18n.t("关闭服务器", I18n.lang) },
+            { c: "reload", d: I18n.t("重新加载配置", I18n.lang) },
+            { c: "whitelist on", d: I18n.t("开启白名单", I18n.lang) },
+            { c: "whitelist off", d: I18n.t("关闭白名单", I18n.lang) },
+            { c: "banlist", d: I18n.t("查看封禁列表", I18n.lang) },
+            { c: "list", d: I18n.t("列出在线玩家", I18n.lang) }
+        ]}
+    ]
+    readonly property var quickActions: [
+        { label: I18n.t("保存", I18n.lang), cmd: "save-all" },
+        { label: I18n.t("白天", I18n.lang), cmd: "time set day" },
+        { label: I18n.t("夜晚", I18n.lang), cmd: "time set night" },
+        { label: I18n.t("放晴", I18n.lang), cmd: "weather clear" },
+        { label: I18n.t("难度", I18n.lang), cmd: "difficulty <difficulty>" },
+        { label: I18n.t("OP", I18n.lang), cmd: "op <player>" },
+        { label: I18n.t("传送", I18n.lang), cmd: "tp <player> <target>" },
+        { label: I18n.t("给予", I18n.lang), cmd: "give <player> <item> [count]" },
+        { label: I18n.t("踢出", I18n.lang), cmd: "kick <player>" },
+        { label: I18n.t("重载", I18n.lang), cmd: "reload" },
+        { label: I18n.t("列出", I18n.lang), cmd: "list" },
+        { label: I18n.t("关机", I18n.lang), cmd: "stop" }
+    ]
+    ListModel { id: hintModel }
+    property bool hintsVisible: false
+
+    function updateHints() {
+        const t = cmdField.text.trim().toLowerCase()
+        hintModel.clear()
+        if (!t) { hintsVisible = false; return }
+        for (let ci = 0; ci < cmdCatalog.length; ++ci) {
+            const items = cmdCatalog[ci].items
+            for (let i = 0; i < items.length; ++i) {
+                const item = items[i]
+                if (item === undefined || item === null) continue
+                const c = item.c.toLowerCase()
+                if (c.indexOf(t) >= 0)
+                    hintModel.append({ cmd: item.c, desc: item.d })
+            }
+        }
+        hintsVisible = hintModel.count > 0 && cmdField.activeFocus
+    }
+    function applyCommand(cmd) {
+        cmdField.text = cmd
+        cmdField.forceActiveFocus()
+        cmdField.cursorPosition = cmd.length
+    }
+    function runQuick(cmd) {
+        if (cmd.indexOf("<") >= 0 || cmd.indexOf("[") >= 0)
+            applyCommand(cmd)
+        else
+            serverController.send(root.serverPath, cmd)
+    }
+    function updateUptime() {
+        if (!root.running) { uptimeText = "—"; return }
+        const s = Math.floor((new Date() - root.runningSince) / 1000)
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
+        uptimeText = (h > 0 ? h + "h " : "") + (m > 0 || h > 0 ? m + "m " : "") + sec + "s"
+    }
+    // 资源占用：从 ServerController::runningServerUsages() 取本服 CPU% / 内存
+    function updateUsage() {
+        if (!root.running) { cpuText = "—"; memText = "—"; return }
+        const list = serverController.runningServerUsages()
+        for (let i = 0; i < list.length; ++i) {
+            const u = list[i]
+            if (u.path === root.serverPath) {
+                cpuVal = u.cpu
+                cpuText = u.cpu.toFixed(0) + "%"
+                memText = (u.memMB >= 1024 ? (u.memMB / 1024).toFixed(1) + " GB" : u.memMB + " MB")
+                tpsText = (typeof u.tps === "number") ? u.tps.toFixed(1) : "—"
+                return
+            }
+        }
+                cpuText = "—"; memText = "—"; tpsText = "—"
+            }
+    // 主动校正：不依赖 onStateChanged 信号。窗口在服务器已启动后才打开（信号早于连接发出）、
+    // 或隐藏期间状态变化、或信号因线程时序遗漏时，仍按 ServerController 当前真实运行态修正本页，
+    // 避免状态显示卡在“已停止”。
+    function syncState() {
+        const r = serverController.isRunning(root.serverPath)
+        if (r === root.running) return
+        root.running = r
+        if (r) {
+            if (!root.runningSince || root.runningSince.getTime() === 0) root.runningSince = new Date()
+            root.uptimeText = "0s"
+            reloadConsole(); reloadMods(); reloadPlayers(); queryWorld()
+        } else {
+            root.uptimeText = "—"
+            reloadConsole(); reloadMods(); reloadPlayers()
+        }
+    }
+
+    function consoleColor(line) {
+        const c = Theme.dark
+            ? { red:"#ff6b6b", orange:"#ffa94d", yellow:"#ffe066", green:"#69db7c", blue:"#74c0fc", white:"#cfe3ff" }
+            : { red:"#c92a2a", orange:"#e8590c", yellow:"#b08900", green:"#2f9e44", blue:"#1971c2", white:Theme.text }
+        if (/\[(ERROR|SEVERE|CRITICAL|FATAL)\]/i.test(line) || /\b(ERROR|SEVERE|CRITICAL|FATAL|EXCEPTION|THROWABLE|NULLPOINTER|FAILED|STACKOVERFLOW)\b/i.test(line)) return c.red
+        if (/\b(WARN|WARNING|DEPRECAT)/i.test(line)) return c.orange
+        if (/\b(DEBUG|TRACE|FINE|VERBOSE)\b/i.test(line)) return c.blue
+        if (/\b(STARTING|PREPARING|LOADING|STOPPING|SAVING|ENABLED|VERSION)\b/i.test(line)) return c.yellow
+        if (/\b(DONE|SUCCESS|SAVED|STARTED|JOINED)\b/i.test(line)) return c.green
+        return c.white
+    }
+
+    // ================= 数据加载 / 实时读取 =================
+    // 发送服务器指令：先把命令回显到控制台（服务端不会回显经 stdin 写入的指令），再真正发送。
+    function sendCommand(cmd) {
+        cmd = (cmd || "").trim()
+        if (!cmd.length) return
+        consoleModel.append({ line: "> " + cmd })
+        consoleView.positionViewAtEnd()
+        serverController.send(root.serverPath, cmd)
+        cmdField.text = ""
+        hintModel.clear()
+    }
+
+    function reloadConsole() {
+        pendingLines = []
+        const text = serverController.getConsole(root.serverPath)
+        consoleModel.clear()
+        const lines = text.split("\n")
+        for (let i = 0; i < lines.length; ++i)
+            if (lines[i].length) consoleModel.append({ line: lines[i] })
+    }
+    function reloadMods() {
+        modsModel.clear()
+        const list = serverController.listMods(root.serverPath)
+        for (let i = 0; i < list.length; ++i) modsModel.append({ name: list[i], version: "" })
+    }
+    function reloadPlayersFromList(players) {
+        playersModel.clear()
+        for (let i = 0; i < players.length; ++i) playersModel.append({ name: players[i] })
+    }
+    function reloadPlayers() {
+        reloadPlayersFromList(serverController.players(root.serverPath))
+    }
+    function queryWorld() {
+        if (!root.running) return
+        worldStateModel.clear()
+        worldQueryActive = true
+        worldQueryTimer.restart()
+        serverController.send(root.serverPath, "difficulty")
+        serverController.send(root.serverPath, "time query daytime")
+        serverController.send(root.serverPath, "weather")
+        serverController.send(root.serverPath, "seed")
+    }
+    function captureWorldLine(line) {
+        let m
+        if ((m = /difficulty:\s*(\w+)/i.exec(line))) setWorldState(I18n.t("难度", I18n.lang), m[1])
+        else if ((m = /the time is (\d+)/i.exec(line))) setWorldState(I18n.t("时间(daytime)", I18n.lang), m[1])
+        else if ((m = /weather state:\s*(\w+)/i.exec(line))) setWorldState(I18n.t("天气", I18n.lang), m[1])
+        else if ((m = /seed:\s*\[?(-?\d+)\]?/i.exec(line))) setWorldState(I18n.t("种子", I18n.lang), m[1])
+    }
+    function setWorldState(k, v) {
+        for (let i = 0; i < worldStateModel.count; ++i)
+            if (worldStateModel.get(i).k === k) { worldStateModel.setProperty(i, "v", v); return }
+        worldStateModel.append({ k: k, v: v })
+    }
+    function sendWorld(cmd) {
+        serverController.send(root.serverPath, cmd)
+        worldRetryTimer.restart()
+    }
+
+    function loadProps() {
+        try {
+            PropsNames.setLanguage(settingsController.language)
+            const map = serverController.readProperties(root.serverPath)
+            const keys = Object.keys(map || {})
+            keys.sort()
+            propsModel.clear()
+            if (keys.length === 0) {
+                propsModel.append({ key: I18n.t("（读取失败或文件为空）", I18n.lang), value: "", isBool: false })
+                return
+            }
+            for (const k of keys) {
+                const v = map[k]
+                propsModel.append({ key: k, value: v, isBool: (v === "true" || v === "false") })
+            }
+        } catch (e) {
+            propsModel.append({ key: I18n.t("读取失败：", I18n.lang) + e, value: "", isBool: false })
+        }
+    }
+    // 供卡片“属性”按键直接打开属性弹窗（无需先进入详情页）
+    function openProps() {
+        loadProps()
+        propsPopup.open()
+    }
+    function saveProps() {
+        const map = {}
+        for (let i = 0; i < propsModel.count; ++i) {
+            const d = propsModel.get(i)
+            map[d.key] = d.value
+        }
+        serverController.writeProperties(root.serverPath, map)
+        if (root.running) { serverController.send(root.serverPath, "reload"); queryWorld() }
+    }
+
+    // 高频日志（服务器启动期每秒几十行）若逐行 append 到 ListView 并每次滚动到底，主线程会被
+    // UI 重排/滚动淹没，导致“启动服务器时程序几乎无法操作”。改为先把行累积到 pendingLines，
+    // 由下面的节流 Timer 每 80ms 批量 append 一次，并只在用户停留在底部时滚动一次。
+    property var pendingLines: []
+    function flushConsole() {
+        if (pendingLines.length === 0) return
+        const atBottom = consoleView.visibleArea.yPosition + consoleView.visibleArea.heightRatio >= 0.999
+        for (let i = 0; i < pendingLines.length; ++i)
+            consoleModel.append({ line: pendingLines[i] })
+        pendingLines = []
+        // 仅当此前停在底部才自动跟到底部，避免打断用户向上翻看历史
+        if (atBottom) consoleView.positionViewAtEnd()
+    }
+    Timer {
+        id: consoleFlushTimer
+        interval: 80
+        repeat: true
+        running: true
+        onTriggered: flushConsole()
+    }
+
+    Connections {
+        target: serverController
+        function onConsoleAppended(name, line) {
+            if (name !== root.serverPath) return
+            pendingLines.push(line)
+            if (worldQueryActive) captureWorldLine(line)
+        }
+        function onStateChanged(name, running) {
+            if (name !== root.serverPath) return
+            root.running = running
+            if (running) { root.runningSince = new Date(); root.uptimeText = "0s"; updateUsage() }
+            else { root.uptimeText = "—"; cpuText = "—"; memText = "—"; tpsText = "—" }
+            reloadConsole(); reloadMods(); reloadPlayers()
+            if (running) queryWorld()
+        }
+        function onPlayersChanged(name, players) {
+            if (name !== root.serverPath) return
+            reloadPlayersFromList(players)
+        }
+    }
+    Connections {
+        target: settingsController
+        function onLanguageChanged() {
+            PropsNames.setLanguage(settingsController.language)
+        }
+    }
+    Connections {
+        target: backupController
+        function onBackupFinished(name, ok, message, dest) {
+            if (name !== root.serverPath) return
+            showToast((ok ? I18n.t("备份成功", I18n.lang) + "：" : I18n.t("备份失败", I18n.lang) + "：") + message, ok)
+        }
+    }
+    Connections {
+        target: updateController
+        function onUpdateAvailable(name, current, latest, url) {
+            if (name !== root.serverPath) return
+            if (url.indexOf("http") === 0) {
+                updateLatest = latest
+                updateUrl = url
+                updatePopup.open()
+            } else {
+                showToast(latest, false)   // 非 http 时 latest 为错误信息
+            }
+        }
+        function onUpdateFinished(name, ok, message, newVersion) {
+            if (name !== root.serverPath) return
+            showToast(message, ok)
+        }
+    }
+
+    Timer { id: uptimeTimer; interval: 1000; running: root.running; repeat: true; onTriggered: updateUptime() }
+    Timer { id: usageTimer; interval: 2000; running: root.running; repeat: true; onTriggered: updateUsage() }
+    Timer { id: worldQueryTimer; interval: 2500; onTriggered: worldQueryActive = false }
+    Timer { id: worldRetryTimer; interval: 700; onTriggered: queryWorld() }
+    // 周期兜底校正运行态（每 2 秒）：与 syncState 同理，确保任何生命周期下状态显示都不会
+    // 卡在旧值（例如本地端窗口关闭期间由 WebUI 启动服务器，再打开本地窗口时仍显示正确）。
+    Timer { id: stateSyncTimer; interval: 2000; running: true; repeat: true; onTriggered: {
+        const r = serverController.isRunning(root.serverPath)
+        if (r !== root.running) {
+            root.running = r
+            if (r) { if (!root.runningSince || root.runningSince.getTime() === 0) root.runningSince = new Date(); queryWorld() }
+        }
+    } }
+
+    Component.onCompleted: { PropsNames.setLanguage(settingsController.language); reloadConsole(); reloadMods(); reloadPlayers(); syncState(); root.refreshMyError() }
+
+    // ================= 主布局 =================
+    ColumnLayout { anchors.fill: parent; spacing: 8
+
+        // ===== 上半部分：服务器信息 =====
+        ColumnLayout { spacing: 10; Layout.fillWidth: true
+            Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 14; Layout.bottomMargin: 10
+
+            RowLayout { spacing: 10
+                Label { text: root.serverName; font.pixelSize: 18; font.bold: true; color: Theme.text }
+                RowLayout { spacing: 5
+                    Rectangle { width: 9; height: 9; radius: 4.5; color: root.running ? "#3ec46d" : "#9aa0a6" }
+                    Label { text: statusText; color: Theme.textMuted }
+                }
+                Item { Layout.fillWidth: true }
+                // 启停：停止时绿底「启动」，运行时浅红「停止」+ 深红「强制停止」
+                AccentButton {
+                    text: I18n.t("启动", I18n.lang)
+                    accentColor: Theme.success
+                    visible: !root.running
+                    onClicked: serverController.start(root.serverName, root.serverPath)
+                }
+                RowLayout {
+                    visible: root.running
+                    spacing: 4
+                    AccentButton {
+                        text: I18n.t("停止", I18n.lang)
+                        accentColor: Qt.lighter(Theme.danger, 1.3)
+                        onClicked: serverController.stop(root.serverPath)
+                    }
+                    AccentButton {
+                        text: I18n.t("强制停止", I18n.lang)
+                        accentColor: Qt.darker(Theme.danger, 1.3)
+                        onClicked: serverController.forceStop(root.serverPath)
+                    }
+                }
+        AccentButton {
+            text: I18n.t("属性", I18n.lang)
+            onClicked: { loadProps(); propsPopup.open() }
+        }
+        // 一键安装优化模组（第3项）：仅当服务器含 mods/ 目录（模组服）时显示
+        AccentButton {
+            text: I18n.t("优化模组", I18n.lang)
+            visible: root.hasModsDir
+            onClicked: { optLoaderCombo.currentIndex = 0; optVerCombo.currentIndex = 0; optProgress.visible = false; optDlg.open() }
+        }
+        // 异常纠错跳转（第5项）：仅当该服当前存在活动异常时显示
+        AccentButton {
+            text: I18n.t("异常纠错", I18n.lang)
+            accentColor: Theme.danger
+            visible: root.hasActiveError
+            onClicked: { window.selectPage("error"); }
+        }
+        AccentButton {
+            text: I18n.t("删除服务器", I18n.lang)
+            accentColor: Theme.danger
+            onClicked: delDlg.open()
+        }
+    }
+
+            RowLayout { spacing: 18
+                Label { text: I18n.t("类型: ", I18n.lang) + (root.serverType ? root.serverType : "—"); color: Theme.textMuted }
+                Label { text: I18n.t("版本: ", I18n.lang) + root.serverVersion; color: Theme.textMuted }
+                Label { text: I18n.t("运行时间: ", I18n.lang) + uptimeText; color: Theme.textMuted }
+                Label { text: I18n.t("CPU: ", I18n.lang) + cpuText; color: Theme.textMuted }
+                Label { text: I18n.t("内存: ", I18n.lang) + memText; color: Theme.textMuted }
+                Label { text: I18n.t("TPS: ", I18n.lang) + tpsText; color: Theme.textMuted }
+                Item { Layout.fillWidth: true }
+            }
+
+            // 绑定代理（第2项：把服务器归属到某个代理实例，绑定后在代理标签页下展示）
+            RowLayout { spacing: 10; Layout.fillWidth: true
+                Label { text: I18n.t("归属代理:", I18n.lang); color: Theme.textMuted }
+                ComboBox {
+                    id: proxyBindCombo
+                    Layout.preferredWidth: 240
+                    height: 34
+                    palette.text: Theme.text
+                    property string currentProxyId: {
+                        const list = serverManager.serverSummary()
+                        for (let i = 0; i < list.length; ++i)
+                            if (list[i].name === root.serverName) return list[i].proxyId || ""
+                        return ""
+                    }
+                    model: [{ id: "", name: I18n.t("（未绑定）", I18n.lang), running: false }].concat(
+                        (typeof proxyManager !== "undefined" && proxyManager && proxyManager.proxies)
+                            ? proxyManager.proxies.map(function(p){ return { id: p.instanceId, name: (p.name || p.instanceId), running: !!p.running, port: p.port }; })
+                            : []
+                    )
+                    textRole: "name"
+                    valueRole: "id"
+                    currentIndex: {
+                        const id = currentProxyId
+                        for (let i = 0; i < model.length; ++i)
+                            if (model[i].id === id) return i
+                        return 0
+                    }
+                    // 隐藏默认双箭头指示器，统一用单个向下箭头
+                    indicator: null
+                    background: Rectangle {
+                        color: proxyBindCombo.hovered ? Theme.panel : Theme.bg
+                        radius: Theme.radius; border.color: Theme.border; border.width: 1
+                    }
+                    delegate: ItemDelegate {
+                        width: proxyBindCombo.width
+                        contentItem: Row {
+                            spacing: 6; anchors.verticalCenter: parent.verticalCenter
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 8; height: 8; radius: 4
+                                color: modelData.running ? "#43d17a" : (modelData.id === "" ? Theme.border : Theme.border)
+                            }
+                            Label {
+                                text: modelData.name + (modelData.running ? " · 运行中" : "")
+                                color: Theme.text; font.pixelSize: 12
+                            }
+                        }
+                        highlighted: proxyBindCombo.highlightedIndex === index
+                        background: Rectangle { color: highlighted ? Theme.panelAlt : "transparent" }
+                    }
+                    contentItem: RowLayout {
+                        spacing: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left; anchors.leftMargin: 12
+                        anchors.right: parent.right; anchors.rightMargin: 10
+                        Rectangle {
+                            width: 8; height: 8; radius: 4
+                            color: (proxyBindCombo.model[proxyBindCombo.currentIndex]
+                                    ? (proxyBindCombo.model[proxyBindCombo.currentIndex].running ? "#43d17a" : Theme.border)
+                                    : Theme.border)
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: (proxyBindCombo.model[proxyBindCombo.currentIndex]
+                                   ? proxyBindCombo.model[proxyBindCombo.currentIndex].name
+                                     + (proxyBindCombo.model[proxyBindCombo.currentIndex].running ? " · 运行中" : "")
+                                   : I18n.t("（未绑定）", I18n.lang))
+                            color: Theme.text; font.pixelSize: 12
+                        }
+                        Label {
+                            text: "▾"; color: Theme.textMuted; font.pixelSize: 12
+                        }
+                    }
+                    onActivated: {
+                        serverManager.setServerProxy(root.serverName, currentValue || "")
+                    }
+                }
+                Label { text: I18n.t("绑定后可在对应代理标签页下直接管理此服务器", I18n.lang); color: Theme.textMuted; font.pixelSize: 11 }
+            }
+
+            // 本服务器异常纠错（专属纠错页，存在活动异常时显示）
+            // 用 Loader 包裹：myError 为 null 时不实例化内部，避免对 null 取值报错
+            Loader {
+                Layout.fillWidth: true
+                active: root.myError !== null
+                visible: active
+                sourceComponent: Rectangle {
+                    color: Theme.panel; radius: Theme.radius
+                    border.color: errorTypeColor(root.myError.type)
+                    implicitHeight: srvErrCol.implicitHeight + 24
+                    Column {
+                        id: srvErrCol
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 12 }
+                        spacing: 10
+                        Row { spacing: 8
+                            Rectangle { width: 12; height: 12; radius: 6; color: errorTypeColor(root.myError.type); anchors.verticalCenter: parent.verticalCenter }
+                            Label { text: I18n.t("本服务器异常", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 14; anchors.verticalCenter: parent.verticalCenter }
+                            Label {
+                                text: root.myError.typeLabel
+                                color: errorTypeColor(root.myError.type); font.pixelSize: 12; font.bold: true
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Label {
+                                text: root.myError.fatal
+                                    ? I18n.t("致命错误：无法自动恢复", I18n.lang)
+                                    : (root.myError.retrying
+                                        ? I18n.t("自动重启中：第 %1/%2 次").arg(root.myError.retryCount + 1).arg(root.myError.maxRetries)
+                                        : (root.myError.retryCount >= root.myError.maxRetries
+                                            ? I18n.t("已达最大重试次数（%1）").arg(root.myError.maxRetries)
+                                            : I18n.t("自动重启已关闭，等待手动处理")))
+                                color: root.myError.fatal ? "#f0a020" : (root.myError.retrying ? Theme.text : Theme.textMuted)
+                                font.pixelSize: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                        TextArea {
+                            readOnly: true; wrapMode: Text.WrapAnywhere
+                            text: root.myError.logTail || I18n.t("（无可用日志）", I18n.lang)
+                            font.family: "Consolas, monospace"; font.pixelSize: 11
+                            color: Theme.textMuted
+                            background: Rectangle { color: Theme.bg; radius: 6; border.color: Theme.border }
+                            Layout.fillWidth: true; Layout.maximumHeight: 140
+                        }
+                        Row { spacing: 8
+                            AccentButton {
+                                text: I18n.t("现在重试", I18n.lang)
+                                enabled: !root.myError.fatal
+                                onClicked: { serverController.retryNow(root.myError.path); root.refreshMyError(); }
+                            }
+                            AccentButton {
+                                text: I18n.t("停止重试", I18n.lang)
+                                enabled: root.myError.retrying
+                                onClicked: { serverController.stopRetries(root.myError.path); root.refreshMyError(); }
+                            }
+                            AccentButton {
+                                text: I18n.t("标记已解决", I18n.lang)
+                                accentColor: Theme.success
+                                onClicked: { serverController.clearError(root.myError.path); root.refreshMyError(); }
+                            }
+                        }
+                        Label {
+                            visible: root.myError.type === "eula"
+                            text: I18n.t("处理建议：在服务器目录的 eula.txt 中将 eula=false 改为 eula=true 后，点击“现在重试”。", I18n.lang)
+                            color: "#f0a020"; font.pixelSize: 12; wrapMode: Text.Wrap
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+
+        // ===== 操作行：玩家 / 世界管理 / 模组（同一行，贴右） =====
+        RowLayout { spacing: 6; Layout.fillWidth: true
+            Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 6
+            Item { Layout.fillWidth: true }
+            AccentButton {
+                text: I18n.t("玩家", I18n.lang)
+                onClicked: { reloadPlayers(); playersPopup.open() }
+            }
+            AccentButton {
+                text: I18n.t("世界管理", I18n.lang)
+                onClicked: { loadProps(); queryWorld(); worldPopup.open() }
+            }
+            AccentButton {
+                text: I18n.t("模组", I18n.lang)
+                onClicked: { reloadMods(); modsPopup.open() }
+            }
+            AccentButton {
+                text: I18n.t("备份", I18n.lang)
+                onClicked: { showToast(I18n.t("正在备份…", I18n.lang), true); backupController.backupNow(root.serverName, root.serverPath) }
+            }
+            AccentButton {
+                text: I18n.t("更新核心", I18n.lang)
+                onClicked: {
+                    showToast(I18n.t("正在检测更新…", I18n.lang), true)
+                    updateController.checkUpdate(root.serverName, root.serverType, root.serverVersion)
+                }
+            }
+            AccentButton {
+                text: I18n.t("定时任务", I18n.lang)
+                onClicked: { schedPopup.open() }
+            }
+        }
+
+        // ===== 底部框：指令集 + 快捷操作 + 日志 + 指令输入 =====
+        Rectangle { Layout.fillWidth: true; Layout.fillHeight: true
+            Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 14
+            color: Theme.panelAlt
+            radius: 8
+            border.color: Theme.border
+            ColumnLayout { anchors.fill: parent; spacing: 0
+                Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 14; Layout.bottomMargin: 14
+
+                // 指令集 + 快捷操作：内嵌"frame"容器（类似 .ui 里的 QFrame 套 widget）
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: quickFrameContent.implicitHeight + 16
+                    color: Theme.panelAlt
+                    radius: 6
+                    border.color: Theme.border
+                    ColumnLayout {
+                        id: quickFrameContent
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 8
+                        RowLayout { spacing: 8; Layout.fillWidth: true
+                            Label {
+                                text: I18n.t("快捷操作", I18n.lang)
+                                color: Theme.textMuted; font.pixelSize: 12
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                            Flickable {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignVCenter
+                                Layout.minimumWidth: 80
+                                height: quickRow.height
+                                contentWidth: quickRow.implicitWidth
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                Row {
+                                    id: quickRow
+                                    spacing: 4
+                                    Repeater {
+                                        model: quickActions
+                                        SubtleButton { small: true; text: modelData.label; onClicked: runQuick(modelData.cmd) }
+                                    }
+                                }
+                                ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AsNeeded }
+                            }
+                            AccentButton {
+                                text: I18n.t("指令集", I18n.lang)
+                                onClicked: cmdSetPopup.open()
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+                    }
+                }
+
+                // 日志输出区（框内）
+                Rectangle {
+                    Layout.fillWidth: true; Layout.fillHeight: true
+                    color: Theme.panel
+                    radius: 6
+                    border.color: Theme.border
+                    ListView {
+                        id: consoleView
+                        anchors.fill: parent
+                        anchors.margins: 4
+                        model: consoleModel
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        delegate: Rectangle {
+                            width: consoleView.width
+                            height: consoleLine.implicitHeight + 6
+                            color: "transparent"
+                Text {
+                    id: consoleLine
+                    x: 6; y: 3
+                    width: consoleView.width - 12
+                    text: line
+                    color: root.consoleColor(line)
+                                font.pointSize: 11
+                                font.family: "Consolas, monospace"
+                                wrapMode: Text.Wrap
+                            }
+                        }
+                        ScrollBar.vertical: ScrollBar {
+                            policy: ScrollBar.AsNeeded
+                            width: 8
+                        }
+                    }
+                    Label {
+                        anchors.centerIn: parent
+                        text: consoleModel.count === 0
+                              ? (running ? I18n.t("等待服务器输出…", I18n.lang) : I18n.t("暂无日志，启动服务器后将显示输出", I18n.lang))
+                              : ""
+                        color: Theme.textMuted
+                        font.pixelSize: 13
+                        visible: consoleModel.count === 0
+                    }
+                }
+
+                // 指令输入（最下面，框内）
+                ColumnLayout { spacing: 4; Layout.fillWidth: true
+                    Item {
+                        id: hintView
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: hintView.visible ? Math.min(hintModel.count * 26 + 8, 170) : 0
+                        visible: hintsVisible
+                        Rectangle {
+                            anchors.fill: parent
+                            color: Theme.panel; radius: 6; border.color: Theme.border
+                            visible: hintView.visible
+                        }
+                        ListView {
+                            visible: hintView.visible
+                            anchors.fill: parent
+                            anchors.margins: 4
+                            clip: true
+                            model: hintModel
+                            delegate: Item {
+                                width: ListView.view.width
+                                height: 26
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8; anchors.rightMargin: 8
+                                    spacing: 10
+                                    Label { text: cmd; color: Theme.text; font.family: "Consolas, monospace"; Layout.fillWidth: true }
+                                    Label { text: desc; color: Theme.textMuted; font.pixelSize: 11 }
+                                }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: applyCommand(cmd) }
+                            }
+                        }
+                    }
+                    RowLayout { spacing: 0; Layout.fillWidth: true
+                        TextField {
+                            id: cmdField
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 180
+                            placeholderText: I18n.t("输入服务器指令，如 gamemode creative @a（输入时显示指令提示）", I18n.lang)
+                            color: Theme.text
+                            selectionColor: Theme.accent
+                            selectedTextColor: Theme.text
+                            palette.text: Theme.text
+                            palette.placeholderText: Theme.textMuted
+                            background: Rectangle { color: Theme.panel; radius: 6; border.color: Theme.border }
+                            onTextChanged: updateHints()
+                            onActiveFocusChanged: { if (!cmdField.activeFocus) hintsVisible = false }
+                            onAccepted: { sendCommand(text) }
+                        }
+                        SubtleButton {
+                            text: I18n.t("发送", I18n.lang)
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 70
+                            enabled: root.running
+                            onClicked: { sendCommand(cmdField.text) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ================= 弹窗：玩家（实时在线列表） =================
+    ModalPopup {
+        id: playersPopup
+        popupWidth: 520; popupHeight: 480
+        contentItem: ColumnLayout { spacing: 0
+            RowLayout { spacing: 8; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 14
+                Label { text: I18n.t("在线玩家", I18n.lang) + "（" + playersModel.count + "）"; font.pixelSize: 15; font.bold: true; color: Theme.text }
+                Item { Layout.fillWidth: true }
+                Button { text: I18n.t("刷新", I18n.lang); flat: true; implicitHeight: 28; background: Rectangle { color: parent.hovered ? Theme.panel : Theme.bg; radius: 6; border.color: Theme.border } onClicked: reloadPlayers() }
+                Button { text: I18n.t("关闭", I18n.lang); flat: true; implicitHeight: 28; background: Rectangle { color: parent.hovered ? Theme.panel : Theme.bg; radius: 6; border.color: Theme.border } onClicked: playersPopup.close() }
+            }
+            ScrollView {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                contentWidth: width
+                ColumnLayout {
+                    width: parent.width
+                    spacing: 4; Layout.leftMargin: 14; Layout.rightMargin: 14
+                    Repeater {
+                        model: playersModel
+                        RowLayout { spacing: 6
+                            Image {
+                                source: "https://mc-heads.net/avatar/" + encodeURIComponent(name) + "/32"
+                                width: 28; height: 28; fillMode: Image.PreserveAspectFit
+                                asynchronous: true; cache: true; smooth: true
+                                onStatusChanged: if (status === Image.Error) visible = false
+                            }
+                            Label { text: name; color: Theme.text; font.family: "Consolas, monospace"; Layout.fillWidth: true }
+                            Button { text: I18n.t("OP", I18n.lang); flat: true; implicitHeight: 24; implicitWidth: 46; background: Rectangle { color: parent.hovered ? Theme.accentSoft : Theme.panelAlt; radius: 5; border.color: Theme.border } onClicked: serverController.send(root.serverPath, "op " + name) }
+                            Button { text: I18n.t("取消OP", I18n.lang); flat: true; implicitHeight: 24; implicitWidth: 56; background: Rectangle { color: parent.hovered ? Theme.accentSoft : Theme.panelAlt; radius: 5; border.color: Theme.border } onClicked: serverController.send(root.serverPath, "deop " + name) }
+                            Button { text: I18n.t("踢出", I18n.lang); flat: true; implicitHeight: 24; implicitWidth: 46; background: Rectangle { color: parent.hovered ? Theme.accentSoft : Theme.panelAlt; radius: 5; border.color: Theme.border } onClicked: serverController.send(root.serverPath, "kick " + name) }
+                            Button { text: I18n.t("封禁", I18n.lang); flat: true; implicitHeight: 24; implicitWidth: 46; background: Rectangle { color: parent.hovered ? Theme.accentSoft : Theme.panelAlt; radius: 5; border.color: Theme.border } onClicked: serverController.send(root.serverPath, "ban " + name) }
+                        }
+                    }
+                    Label { text: I18n.t("（当前无在线玩家，或服务器未运行）", I18n.lang); color: Theme.textMuted; visible: playersModel.count === 0 }
+                }
+            }
+        }
+        // 实时轮询在线玩家（每 5 秒），弹窗打开期间持续刷新
+        Timer { id: playersPollTimer; interval: 5000; repeat: true; running: playersPopup.visible; onTriggered: reloadPlayers() }
+    }
+
+    // ================= 弹窗：世界管理（实时读取） =================
+    ModalPopup {
+        id: worldPopup
+        popupWidth: 560; popupHeight: 540
+        contentItem: ColumnLayout { spacing: 0
+            RowLayout { spacing: 8; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 14
+                Label { text: I18n.t("世界管理", I18n.lang); font.pixelSize: 15; font.bold: true; color: Theme.text }
+                Item { Layout.fillWidth: true }
+                Button { text: I18n.t("刷新状态", I18n.lang); flat: true; implicitHeight: 28; background: Rectangle { color: parent.hovered ? Theme.panel : Theme.bg; radius: 6; border.color: Theme.border } onClicked: queryWorld() }
+                Button { text: I18n.t("关闭", I18n.lang); flat: true; implicitHeight: 28; background: Rectangle { color: parent.hovered ? Theme.panel : Theme.bg; radius: 6; border.color: Theme.border } onClicked: worldPopup.close() }
+            }
+            ScrollView {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                contentWidth: width
+                ColumnLayout {
+                    width: parent.width
+                    spacing: 10; Layout.leftMargin: 14; Layout.rightMargin: 14
+
+                    Label { text: I18n.t("实时状态", I18n.lang); color: Theme.accent; font.bold: true; font.pixelSize: 12 }
+                    Repeater {
+                        model: worldStateModel
+                        RowLayout { spacing: 10
+                            Label { text: k; color: Theme.textMuted; Layout.preferredWidth: 120 }
+                            Label { text: v; color: Theme.text; font.family: "Consolas, monospace" }
+                        }
+                    }
+                    Label { text: I18n.t("（正在读取，或服务器未运行 / 非英文输出）", I18n.lang); color: Theme.textMuted; visible: worldStateModel.count === 0 }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+
+                    Label { text: I18n.t("快捷命令", I18n.lang); color: Theme.accent; font.bold: true; font.pixelSize: 12 }
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Repeater {
+                            model: [
+                                { t: I18n.t("白天", I18n.lang), c: "time set day" },
+                                { t: I18n.t("夜晚", I18n.lang), c: "time set night" },
+                                { t: I18n.t("放晴", I18n.lang), c: "weather clear" },
+                                { t: I18n.t("下雨", I18n.lang), c: "weather rain" },
+                                { t: I18n.t("雷暴", I18n.lang), c: "weather thunder" },
+                                { t: I18n.t("和平", I18n.lang), c: "difficulty peaceful" },
+                                { t: I18n.t("简单", I18n.lang), c: "difficulty easy" },
+                                { t: I18n.t("普通", I18n.lang), c: "difficulty normal" },
+                                { t: I18n.t("困难", I18n.lang), c: "difficulty hard" },
+                                { t: I18n.t("保存", I18n.lang), c: "save-all" },
+                                { t: I18n.t("重载", I18n.lang), c: "reload" }
+                            ]
+                            Button { text: modelData.t; flat: true; implicitHeight: 28; background: Rectangle { color: hovered ? Theme.accentSoft : Theme.panelAlt; radius: 6; border.color: Theme.border } onClicked: sendWorld(modelData.c) }
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+
+                    Label { text: I18n.t("世界配置（来自 server.properties）", I18n.lang); color: Theme.accent; font.bold: true; font.pixelSize: 12 }
+                    Repeater {
+                        model: propsModel
+                        RowLayout { spacing: 10
+                            Label { text: key ? PropsNames.label(key) : ""; color: Theme.textMuted; Layout.fillWidth: true; elide: Text.ElideRight }
+                            Label { text: value !== undefined ? value : ""; color: Theme.text; font.family: "Consolas, monospace" }
+                        }
+                    }
+                }
+            }
+        }
+        // 实时轮询世界状态（每 5 秒），弹窗打开期间持续刷新
+        Timer { id: worldPollTimer; interval: 5000; repeat: true; running: worldPopup.visible; onTriggered: if (root.running) queryWorld() }
+    }
+
+    // ================= 弹窗：模组 =================
+    ModalPopup {
+        id: modsPopup
+        popupWidth: 560; popupHeight: 460
+        contentItem: ColumnLayout { spacing: 0
+            Label { text: I18n.t("已安装模组", I18n.lang) + "（" + modsModel.count + "）"; font.pixelSize: 15; font.bold: true; color: Theme.text; padding: 14 }
+            ScrollView {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                contentWidth: width
+                ColumnLayout {
+                    width: parent.width
+                    spacing: 4; Layout.leftMargin: 14; Layout.rightMargin: 14
+                    Repeater {
+                        model: modsModel
+                        RowLayout { spacing: 10
+                            Label { text: name; color: Theme.text; Layout.fillWidth: true }
+                            Label { text: version || ""; color: Theme.textMuted }
+                        }
+                    }
+                    Label { text: I18n.t("（服务器未运行或无模组）", I18n.lang); color: Theme.textMuted; visible: modsModel.count === 0 }
+                }
+            }
+            RowLayout { spacing: 8; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 14; Layout.topMargin: 8
+                Item { Layout.fillWidth: true }
+                Button { text: I18n.t("关闭", I18n.lang); background: Rectangle { color: parent.hovered ? Theme.panel : Theme.bg; radius: 6; border.color: Theme.border } onClicked: modsPopup.close() }
+            }
+        }
+    }
+
+    // ================= 弹窗：服务器属性（编辑） =================
+    ModalPopup {
+        id: propsPopup
+        popupWidth: 560; popupHeight: 520
+        contentItem: ColumnLayout { spacing: 0
+            Label { text: I18n.t("属性", I18n.lang); font.pixelSize: 15; font.bold: true; color: Theme.text; padding: 14 }
+            ListView {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                clip: true
+                model: propsModel
+                spacing: 8
+                leftMargin: 14; rightMargin: 14
+                topMargin: 8; bottomMargin: 8
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                delegate: RowLayout {
+                    width: ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin
+                    spacing: 10
+                    Label {
+                        text: PropsNames.label(key) + " (" + key + ")"
+                        color: Theme.text
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 120
+                        elide: Text.ElideRight
+                    }
+                    Switch {
+                        visible: isBool
+                        checked: value === 'true'
+                        onToggled: value = checked ? 'true' : 'false'
+                    }
+                    TextField {
+                        visible: !isBool
+                        text: value
+                        color: Theme.text
+                        Layout.preferredWidth: 160
+                        background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                        onTextChanged: value = text
+                    }
+                }
+            }
+            RowLayout { spacing: 8; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 14; Layout.topMargin: 8
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: I18n.t("取消", I18n.lang)
+                    background: Rectangle {
+                        radius: 6
+                        border.color: Theme.danger
+                        color: parent.hovered ? Qt.darker(Theme.danger, 1.18) : Theme.danger
+                    }
+                    contentItem: Label {
+                        text: parent.text
+                        color: Theme.dark ? "#ffffff" : "#5c160c"
+                        horizontalAlignment: Qt.AlignHCenter
+                        verticalAlignment: Qt.AlignVCenter
+                        font: parent.font
+                    }
+                    onClicked: propsPopup.close()
+                }
+                Button {
+                    text: I18n.t("保存", I18n.lang)
+                    contentItem: Label { text: parent.text; color: Theme.text; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font: parent.font }
+                    background: Rectangle { color: parent.hovered ? Qt.darker(Theme.accent, 1.15) : Theme.accent; radius: 6 }
+                    onClicked: { saveProps(); propsPopup.close() }
+                }
+            }
+        }
+    }
+
+    // ================= 弹窗：删除服务器确认（自定义美化，与属性弹窗风格一致） =================
+    ModalPopup {
+        id: delDlg
+        popupWidth: 420; popupHeight: 220
+        contentItem: ColumnLayout { spacing: 0
+            Label { text: I18n.t("删除服务器", I18n.lang); font.pixelSize: 15; font.bold: true; color: Theme.danger; padding: 14 }
+            Rectangle { height: 1; color: Theme.border }
+            Label {
+                text: root.running
+                    ? I18n.t("服务器正在运行，请先停止服务器后再删除。", I18n.lang)
+                    : I18n.t("确定删除服务器 “%1” 吗？此操作不可撤销。").arg(root.serverName)
+                color: root.running ? Theme.danger : Theme.text; wrapMode: Text.Wrap
+                Layout.fillWidth: true
+                Layout.leftMargin: 14; Layout.rightMargin: 14
+                Layout.topMargin: 14; Layout.bottomMargin: 14
+            }
+            Rectangle { height: 1; color: Theme.border }
+            RowLayout {
+                Layout.fillWidth: true; Layout.rightMargin: 14
+                Layout.topMargin: 10; Layout.bottomMargin: 10
+                Layout.alignment: Qt.AlignRight
+                SubtleButton { text: I18n.t("取消", I18n.lang); onClicked: delDlg.close() }
+                AccentButton {
+                    text: I18n.t("删除", I18n.lang)
+                    accentColor: Theme.danger
+                    enabled: !root.running
+                    onClicked: { serverManager.removeServer(root.serverIndex); delDlg.close(); }
+                }
+            }
+        }
+    }
+
+    // ================= 弹窗：指令集 =================
+    ModalPopup {
+        id: cmdSetPopup
+        popupWidth: 640; popupHeight: 560
+        contentItem: ColumnLayout { spacing: 0
+            Label { text: I18n.t("指令集", I18n.lang); font.pixelSize: 15; font.bold: true; color: Theme.text; padding: 14 }
+            ScrollView {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                contentWidth: width
+                ColumnLayout {
+                    width: parent.width
+                    spacing: 10; Layout.leftMargin: 14; Layout.rightMargin: 14
+                    Repeater {
+                        model: cmdCatalog
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            Label { text: modelData.cat; color: Theme.accent; font.bold: true; font.pixelSize: 12 }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Repeater {
+                                    model: modelData.items
+                                    Button {
+                                        flat: true
+                                        implicitWidth: Math.max(tm.width + 24, 170)
+                                        implicitHeight: 48
+                                        background: Rectangle { color: hovered ? Theme.accentSoft : Theme.panel; radius: 6; border.color: Theme.border }
+                                        contentItem: ColumnLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 6
+                                            spacing: 3
+                                            Text {
+                                                text: modelData.c
+                                                color: Theme.text
+                                                font.family: "Consolas, monospace"
+                                                font.pixelSize: 12
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                            Text {
+                                                text: modelData.d
+                                                color: Theme.textMuted
+                                                font.pixelSize: 11
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                        TextMetrics { id: tm; text: modelData.c; font.family: "Consolas, monospace"; font.pixelSize: 12 }
+                                        onClicked: applyCommand(modelData.c)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            RowLayout { spacing: 8; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 14; Layout.topMargin: 8
+                Label { text: I18n.t("点击指令以填入输入框", I18n.lang); color: Theme.textMuted; font.pixelSize: 11 }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: I18n.t("关闭", I18n.lang)
+                    background: Rectangle { color: parent.hovered ? Theme.panel : Theme.bg; radius: 6; border.color: Theme.border }
+                    onClicked: cmdSetPopup.close()
+                }
+            }
+        }
+    }
+
+    // ================= 提示条（备份 / 更新结果） =================
+    Rectangle {
+        id: toast
+        visible: false
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 28
+        width: toastLabel.implicitWidth + 28
+        height: toastLabel.implicitHeight + 14
+        radius: 8
+        color: toastOk ? Theme.success : Theme.danger
+        opacity: 0.96
+        Text { id: toastLabel; anchors.centerIn: parent; text: toastText; color: "#ffffff"; font.pixelSize: 13 }
+        MouseArea { anchors.fill: parent; onClicked: toast.visible = false }
+    }
+    Timer { id: toastTimer; interval: 2800; onTriggered: toast.visible = false }
+
+    // ================= 弹窗：一键更新 =================
+    ModalPopup {
+        id: updatePopup
+        popupWidth: 460; popupHeight: 260
+        contentItem: ColumnLayout { spacing: 0
+            Label { text: I18n.t("一键更新核心", I18n.lang); font.pixelSize: 15; font.bold: true; color: Theme.text; padding: 14 }
+            Rectangle { height: 1; color: Theme.border }
+            ColumnLayout { spacing: 8; Layout.fillWidth: true
+                Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 14; Layout.bottomMargin: 14
+                Label { text: I18n.t("当前版本: ", I18n.lang) + root.serverVersion; color: Theme.text }
+                Label { text: I18n.t("最新版本: ", I18n.lang) + updateLatest; color: Theme.accent; font.bold: true }
+                Label { text: I18n.t("更新会备份旧 server.jar 为 server.jar.bak，建议先停止服务器再更新。", I18n.lang); color: Theme.textMuted; wrapMode: Text.Wrap }
+            }
+            Rectangle { height: 1; color: Theme.border }
+            RowLayout { spacing: 8; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 14; Layout.topMargin: 10; Layout.alignment: Qt.AlignRight
+                SubtleButton { text: I18n.t("取消", I18n.lang); onClicked: updatePopup.close() }
+                AccentButton {
+                    text: I18n.t("立即更新", I18n.lang)
+                    onClicked: {
+                        updatePopup.close()
+                        showToast(I18n.t("正在下载更新…", I18n.lang), true)
+                        updateController.updateJar(root.serverName, root.serverPath, root.serverType, root.serverVersion)
+                    }
+                }
+            }
+        }
+    }
+
+    // ================= 弹窗：定时任务（B4） =================
+    ModalPopup {
+        id: schedPopup
+        popupWidth: 600; popupHeight: 520
+        contentItem: ColumnLayout { spacing: 0
+            Label { text: I18n.t("定时任务", I18n.lang); font.pixelSize: 15; font.bold: true; color: Theme.text; padding: 14 }
+            Rectangle { height: 1; color: Theme.border }
+            ScrollView {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                contentWidth: width
+                ColumnLayout { width: parent.width; spacing: 6; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 10
+                    Repeater {
+                        model: schedulerController.tasks
+                        RowLayout { spacing: 8
+                            Label { text: modelData.server; color: Theme.text; Layout.preferredWidth: 110; elide: Text.ElideRight }
+                            Label {
+                                text: (modelData.action === "start" ? I18n.t("启动", I18n.lang)
+                                       : modelData.action === "stop" ? I18n.t("停止", I18n.lang)
+                                       : I18n.t("备份", I18n.lang))
+                                color: Theme.textMuted; Layout.preferredWidth: 50
+                            }
+                            Label { text: modelData.time; color: Theme.text; font.family: "Consolas, monospace"; Layout.preferredWidth: 60 }
+                            Switch {
+                                checked: modelData.enabled !== false
+                                onToggled: {
+                                    const t = schedulerController.tasks[index]
+                                    t.enabled = checked
+                                    schedulerController.updateTask(index, t)
+                                }
+                            }
+                            Button { text: I18n.t("执行", I18n.lang); flat: true; implicitHeight: 24; implicitWidth: 46; background: Rectangle { color: parent.hovered ? Theme.accentSoft : Theme.panelAlt; radius: 5; border.color: Theme.border } onClicked: schedulerController.runTask(index) }
+                            Button { text: I18n.t("删除", I18n.lang); flat: true; implicitHeight: 24; implicitWidth: 46; background: Rectangle { color: parent.hovered ? Theme.accentSoft : Theme.panelAlt; radius: 5; border.color: Theme.border } onClicked: schedulerController.removeTask(index) }
+                        }
+                    }
+                    Label { text: I18n.t("（暂无定时任务，在下方添加）", I18n.lang); color: Theme.textMuted; visible: schedulerController.tasks.length === 0 }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border; Layout.topMargin: 8; Layout.bottomMargin: 8 }
+
+                    Label { text: I18n.t("新增任务", I18n.lang); color: Theme.accent; font.bold: true; font.pixelSize: 12 }
+                    RowLayout { spacing: 8; Layout.fillWidth: true
+                        ComboBox {
+                            id: schedServerCombo
+                            Layout.fillWidth: true
+                            model: serverManager.serverSummary()
+                            textRole: "name"
+                            displayText: currentText
+                        }
+                        ComboBox {
+                            id: schedActionCombo
+                            Layout.preferredWidth: 110
+                            model: [
+                                { k: "start", l: I18n.t("启动", I18n.lang) },
+                                { k: "stop", l: I18n.t("停止", I18n.lang) },
+                                { k: "backup", l: I18n.t("备份", I18n.lang) }
+                            ]
+                            textRole: "l"
+                            valueRole: "k"
+                        }
+                        TextField {
+                            id: schedTimeField
+                            Layout.preferredWidth: 90
+                            placeholderText: "HH:MM"
+                            text: "08:00"
+                            color: Theme.text
+                            background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                        }
+                        AccentButton {
+                            text: I18n.t("添加", I18n.lang)
+                            onClicked: {
+                                if (!schedServerCombo.currentText) return
+                                schedulerController.addTask({
+                                    server: schedServerCombo.currentText,
+                                    action: schedActionCombo.currentValue,
+                                    time: schedTimeField.text
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+            RowLayout { spacing: 8; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 14; Layout.topMargin: 8
+                Item { Layout.fillWidth: true }
+                Button { text: I18n.t("关闭", I18n.lang); background: Rectangle { color: parent.hovered ? Theme.panel : Theme.bg; radius: 6; border.color: Theme.border } onClicked: schedPopup.close() }
+            }
+        }
+    }
+
+    // ================= 弹窗：一键安装优化模组（第3项） =================
+    ModalPopup {
+        id: optDlg
+        popupWidth: 520; popupHeight: 460
+        Component.onCompleted: {
+            downloadCatalog.optimizationModsReady.connect(function(mods){
+                optPreview.model = mods
+            })
+            downloadCatalog.optimizationInstallProgress.connect(function(title, done, total){
+                optProgress.visible = true
+                optProgressText.text = I18n.t("安装中 %1/%2：%3").arg(done).arg(total).arg(title)
+            })
+            downloadCatalog.optimizationInstallFinished.connect(function(ok, msg){
+                optProgress.visible = false
+                showToast(msg, ok)
+            })
+        }
+        contentItem: ColumnLayout { spacing: 0
+            Label { text: I18n.t("一键安装优化模组", I18n.lang); font.pixelSize: 15; font.bold: true; color: Theme.text; padding: 14 }
+            Rectangle { height: 1; color: Theme.border }
+            ColumnLayout { spacing: 10; Layout.fillWidth: true
+                Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 12
+                Label { text: I18n.t("为当前模组服按 MC 版本与加载器检索并安装优化类模组（Lithium/Sodium/Phosphor/Ferrite-Core 等）。", I18n.lang); color: Theme.textMuted; wrapMode: Text.Wrap }
+                RowLayout { spacing: 10
+                    Label { text: I18n.t("MC 版本:", I18n.lang); color: Theme.textMuted }
+                    TextField {
+                        id: optVerCombo
+                        Layout.preferredWidth: 130
+                        text: root.serverVersion
+                        color: Theme.text
+                        background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                    }
+                    Label { text: I18n.t("加载器:", I18n.lang); color: Theme.textMuted }
+                    ComboBox {
+                        id: optLoaderCombo
+                        Layout.preferredWidth: 140
+                        palette.text: Theme.text
+                        model: [
+                            { k: "fabric", l: "Fabric" },
+                            { k: "forge", l: "Forge" },
+                            { k: "neoforge", l: "NeoForge" }
+                        ]
+                        textRole: "l"; valueRole: "k"
+                        currentIndex: 0
+                    }
+                }
+                AccentButton {
+                    text: I18n.t("检索可优化模组", I18n.lang)
+                    onClicked: downloadCatalog.fetchOptimizationMods(optVerCombo.text.trim(), optLoaderCombo.currentValue)
+                }
+                Label { text: I18n.t("可安装的优化模组：", I18n.lang); color: Theme.text; font.bold: true; visible: optPreview.count > 0 }
+                ScrollView {
+                    Layout.fillWidth: true; Layout.preferredHeight: 150
+                    contentWidth: width
+                    ListView {
+                        id: optPreview
+                        anchors.fill: parent
+                        model: []
+                        delegate: Rectangle {
+                            width: ListView.view.width; height: 30
+                            color: "transparent"
+                            RowLayout { spacing: 8; width: parent.width
+                                Label { text: "•"; color: Theme.accent }
+                                Label { text: (modelData.name || modelData.slug); color: Theme.text; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                Label { text: (modelData.version || ""); color: Theme.textMuted; font.pixelSize: 11 }
+                            }
+                        }
+                    }
+                }
+                Label { id: optProgressText; visible: false; color: Theme.accent; font.pixelSize: 12 }
+                ProgressBar { id: optProgress; visible: false; Layout.fillWidth: true; indeterminate: true }
+            }
+            Rectangle { height: 1; color: Theme.border }
+            RowLayout { spacing: 8; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.bottomMargin: 14; Layout.topMargin: 10; Layout.alignment: Qt.AlignRight
+                SubtleButton { text: I18n.t("取消", I18n.lang); onClicked: optDlg.close() }
+                AccentButton {
+                    text: I18n.t("安装到本服", I18n.lang)
+                    accentColor: Theme.accent
+                    enabled: optPreview.count > 0
+                    onClicked: {
+                        optProgress.visible = true
+                        downloadCatalog.installOptimizationMods(root.serverPath, optVerCombo.text.trim(), optLoaderCombo.currentValue)
+                    }
+                }
+            }
+        }
+    }
+}

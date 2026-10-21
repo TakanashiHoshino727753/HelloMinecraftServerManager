@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- 圆角底（HMCSM 暗色风格） -->
+  <rect x="14" y="14" width="228" height="228" rx="52" fill="#1b1b27" stroke="#36c5f0" stroke-width="10"/>
+  <!-- 手柄/遥控器机身 -->
+  <rect x="84" y="74" width="88" height="116" rx="24" fill="#262635" stroke="#36c5f0" stroke-width="6"/>
+  <!-- 方向键（十字） -->
+  <rect x="104" y="120" width="20" height="52" rx="6" fill="#36c5f0"/>
+  <rect x="86" y="138" width="56" height="20" rx="6" fill="#36c5f0"/>
+  <!-- 右侧动作键 -->
+  <circle cx="158" cy="106" r="9" fill="#36c5f0"/>
+  <circle cx="158" cy="134" r="9" fill="#36c5f0"/>
+  <circle cx="158" cy="162" r="9" fill="#36c5f0"/>
+</svg>

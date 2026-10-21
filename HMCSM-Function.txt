@@ -1,0 +1,57 @@
+Interface:
+I	Command Line Interface(CLI)
+I	Text Line Interface(TLI)
+I	Desktop Grapical User Interface(GUI)
+I	WebUI Server
+↓	Robot Reply
+Kernel:
+	Control:
+	I	Local Direct Connection
+	l	Remote Connection Interface(API):
+	l		WebUI
+	l		Remote
+	↓		NapCat Plugin
+	Management:
+	↑	Process Privilege Management
+	I	Disk File Access Control
+	l	System Resource Allocation
+	↓	Inter-Module Invocation
+	Execution:
+		Download Manager:
+			Link Acquisition
+			Download Tool
+			Mod-Server Packer
+		Server Manager:
+			Server Control
+			Server Information Processing
+			Server Configuration File Management
+			Process Construction
+			Command Tools:
+				Instruction Set
+				Command Completion
+			Server Creation:
+				Dependency Matching
+				Dependency Completion
+			Player:
+				Information Acquisition
+				Information Organization
+			World:
+				Information Acquisition
+				Information Organization
+				Backup and Restoration
+			Mods:
+				Support Detection
+				Mods List Retrieval
+				Conflict Exclusion
+			WatchDog
+			Auto Correction
+			Package Import:
+				Kernel Recognition
+				Dependency Matching
+				Dependency Completion
+		Settings Editor
+		Performance Monitor
+		File Reading & Editing
+		Database Support
+		Al Integration
+		Interfaces Support for other Managers

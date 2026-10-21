@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>icons/app.ico</file>
+        <file>icons/hmcsm_remote.svg</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,15 @@
+{
+  "name": "napcat-plugin-hmcsm",
+  "version": "1.0.0",
+  "description": "把 QQ 消息桥接到 HMCSM 内置控制通道(25585)，直接控制 Minecraft 服务器",
+  "author": "HMCSM",
+  "main": "index.mjs",
+  "type": "module",
+  "napcat": {
+    "type": "extension",
+    "name": "napcat-plugin-hmcsm",
+    "tags": ["工具", "游戏", "Minecraft"],
+    "minVersion": "4.14.0",
+    "homepage": "https://github.com/yourname/napcat-plugin-hmcsm"
+  }
+}

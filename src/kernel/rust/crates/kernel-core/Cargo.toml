@@ -1,0 +1,9 @@
+[package]
+name = "kernel-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib 导出 C ABI 供 Qt 前端经 QLibrary 加载；rlib 供内部 crate 复用。
+name = "hmcsm_kernel"
+crate-type = ["cdylib", "rlib"]

@@ -1,0 +1,1483 @@
+// ControllerSettings.qml —— 应用设置窗口
+// 职责：外观（深浅色 / 主题色）、语言与开机自启、WebUI 开关及端口、
+// 默认服务器目录。修改即时经 settingsController / appController 持久化。
+// 无边框窗口，圆角跟随 Theme；最大化时圆角归零。
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import QtQuick.Dialogs
+import MinecraftServerManager
+import Qt5Compat.GraphicalEffects
+
+ApplicationWindow {
+    id: window
+    width: 900; height: 620
+    visible: false
+    flags: Qt.Window | Qt.FramelessWindowHint
+    color: "transparent"
+
+    function applyTheme(dark, accent) { appController.setTheme(dark, accent) }
+    // 本窗口独立的轻量提示（ControllerSettings 是独立 Window，引用不到 ServerPage 内的 toast）
+    property string toastMsg: ""
+    function toast(msg) { toastMsg = msg; csToastBox.visible = true; csToastTimer.restart() }
+    function refreshPairQr() {
+        if (typeof webuiServer !== "undefined" && webuiServer)
+            pairQrImg.source = "image://qr/" + encodeURIComponent(webuiServer.pairUri())
+    }
+
+    // 设置分类导航：锚点机制。每个分类对应卡片在 flick 内容坐标中的真实 y（锚点）。
+    // 当前分类 = 最后一个其锚点已越过视口顶（contentY）的分类；有锚点进出视口顶时更新。
+    property string currentSection: "appearance"
+    property bool _navLock: false   // 程序滚动动画期间锁定，避免高亮乱跳
+    property real _navTarget: 0     // 程序滚动的目标位置，到达后解锁
+    function navList() { return [cardA, cardB, cardD, cardC, cardQ, cardBack, cardO] }
+    function navKeys() { return ["appearance", "language", "dir", "webui", "bot", "backup", "ops"] }
+    // 分类卡片在 flick.contentItem 坐标系中的真实 y（锚点），与 flick.contentY 同一坐标系
+    function anchorY(item) { return item.mapToItem(flick.contentItem, 0, 0).y }
+    function sectionOf(item) {
+        var list = navList(), keys = navKeys()
+        for (var i = 0; i < list.length; ++i)
+            if (list[i] === item) return keys[i]
+        return ""
+    }
+    // 点击：立即锁定高亮，并滚动到该分类锚点（顶部对齐视口顶）。动画期间不重算防跳。
+    function scrollTo(item) {
+        if (!item) return
+        currentSection = sectionOf(item)
+        _navLock = true
+        _navTarget = Math.max(0, Math.min(flick.contentHeight - flick.height, anchorY(item)))
+        flick.contentY = _navTarget
+    }
+    // 手动滚动 / 动画结束：根据锚点穿过视口顶判定当前分类
+    function updateCurrent() {
+        if (_navLock) return                // 程序滚动动画期间不重算，防乱跳
+        var list = navList(), keys = navKeys()
+        var y = flick.contentY
+        var cur = keys[0]
+        // 视口内最上面的卡片（第一个底部仍在视口顶之下的卡片）即当前分类：
+        // 某卡片顶部一进入主区域（出现）就高亮它，而非等其顶穿透视口顶才切
+        for (var i = 0; i < list.length; ++i) {
+            if (anchorY(list[i]) + list[i].height > y + 1) { cur = keys[i]; break }
+        }
+        currentSection = cur
+    }
+
+    Component.onCompleted: {
+        for (let i = 0; i < langBox.model.length; ++i)
+            if (langBox.model[i] === settingsController.language) { langBox.currentIndex = i; break }
+        updateCurrent()   // 进入页面时按视口顶锚点初始化当前分类高亮
+        enterAnim.start()
+    }
+
+    // 圆角遮罩源：供 frame 的 layer.effect 使用，把 frame 内所有子项按圆角裁剪
+    Rectangle {
+        id: frameMask
+        anchors.fill: parent
+        radius: window.visibility === Window.Maximized ? 0 : Theme.radius
+        color: "white"
+        visible: false
+    }
+
+    // 背景图层（全窗口最底层，自带圆角裁剪）：所有窗口复用
+    BackgroundLayer {
+        radius: window.visibility === Window.Maximized ? 0 : Theme.radius
+    }
+
+    // 背景：透明 + 轻微主色染色，背景图透过显示（避免依赖外部图片资源）
+    Rectangle {
+        id: frame
+        anchors.fill: parent
+        radius: window.visibility === Window.Maximized ? 0 : Theme.radius
+        color: "transparent"   // 透明：BackgroundLayer 背景图透出
+        opacity: appController.uiTransparency   // 整体受界面控件透明度控制
+        clip: true
+        // 用 layer.effect + OpacityMask 把整个 frame（含子项）按圆角矩形遮罩，
+        // 这是裁掉四角方角、保证圆角的关键（clip:true 只裁矩形、layer.enabled 不裁子项）。
+        layer.enabled: radius > 0
+        layer.effect: OpacityMask {
+            maskSource: frameMask
+        }
+        // 入场滑动动画：从右侧滑入（挂在内层 frame 上，Window 本身不支持 transform；opacity 由 uiTransparency 绑定控制，避免冲突）
+        x: 60
+        ParallelAnimation {
+            id: enterAnim
+            NumberAnimation { target: frame; property: "x"; from: 60; to: 0; duration: 220; easing.type: Easing.OutCubic }
+        }
+
+        // 区域底色层：受区域底色透明度控制（0=全透，1=不透明），与主窗口主区域一致
+        Rectangle {
+            anchors.fill: parent
+            radius: frame.radius
+            color: Theme.bg
+            opacity: appController.bgLayerOpacity
+            z: -1
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            radius: frame.radius
+            color: Theme.accent
+            opacity: 0.05
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 0
+
+            TitleBar {
+                id: titleBar
+                window: window
+                showDownloads: false
+                Layout.fillWidth: true
+            }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
+
+            // 左侧设置导航（与侧边栏同色系，弱化分类说明）：底色受区域底色透明度（1.1倍/0.2下限），控件受界面控件透明度
+            Rectangle {
+                Layout.preferredWidth: 200
+                Layout.fillHeight: true
+                color: "transparent"
+                // 左下角跟随窗口圆角（frame 的 clip 不会裁剪子项的圆角，需在此单独设置）
+                bottomLeftRadius: window.visibility === Window.Maximized ? 0 : Theme.radius
+                // 导航底色层：受区域底色透明度控制，为主区域底色的约 1.1 倍（0.2 起步，上限 1）
+                Rectangle {
+                    anchors.fill: parent
+                    color: Theme.panel
+                    opacity: Math.min(1.0, 0.2 + appController.bgLayerOpacity * 1.1)
+                    bottomLeftRadius: parent.bottomLeftRadius
+                    z: -1
+                }
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 4
+                        opacity: appController.uiTransparency   // 导航内所有控件/文字受界面控件透明度控制
+                        Label { text: I18n.t("设置分类", I18n.lang); color: Theme.textMuted; font.bold: true; font.pixelSize: 11 }
+
+                        Button {
+                            Layout.fillWidth: true; height: 32
+                            leftPadding: 12; rightPadding: 12
+                            text: I18n.t("外观", I18n.lang)
+                            onClicked: scrollTo(cardA)
+                            background: Rectangle {
+                                radius: 6
+                                color: currentSection === "appearance" ? Theme.accentSoft : (parent.hovered ? Theme.panelAlt : "transparent")
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+                            contentItem: Label { text: parent.text; color: currentSection === "appearance" ? Theme.accent : Theme.text; horizontalAlignment: Text.AlignLeft; verticalAlignment: Text.AlignVCenter }
+                        }
+                        Button {
+                            Layout.fillWidth: true; height: 32
+                            leftPadding: 12; rightPadding: 12
+                            text: I18n.t("语言与自启", I18n.lang)
+                            onClicked: scrollTo(cardB)
+                            background: Rectangle {
+                                radius: 6
+                                color: currentSection === "language" ? Theme.accentSoft : (parent.hovered ? Theme.panelAlt : "transparent")
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+                            contentItem: Label { text: parent.text; color: currentSection === "language" ? Theme.accent : Theme.text; horizontalAlignment: Text.AlignLeft; verticalAlignment: Text.AlignVCenter }
+                        }
+                        Button {
+                            Layout.fillWidth: true; height: 32
+                            leftPadding: 12; rightPadding: 12
+                            text: I18n.t("默认服务器目录", I18n.lang)
+                            onClicked: scrollTo(cardD)
+                            background: Rectangle {
+                                radius: 6
+                                color: currentSection === "dir" ? Theme.accentSoft : (parent.hovered ? Theme.panelAlt : "transparent")
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+                            contentItem: Label { text: parent.text; color: currentSection === "dir" ? Theme.accent : Theme.text; horizontalAlignment: Text.AlignLeft; verticalAlignment: Text.AlignVCenter }
+                        }
+                        Button {
+                            Layout.fillWidth: true; height: 32
+                            leftPadding: 12; rightPadding: 12
+                            text: I18n.t("WebUI", I18n.lang)
+                            onClicked: scrollTo(cardC)
+                            background: Rectangle {
+                                radius: 6
+                                color: currentSection === "webui" ? Theme.accentSoft : (parent.hovered ? Theme.panelAlt : "transparent")
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+                            contentItem: Label { text: parent.text; color: currentSection === "webui" ? Theme.accent : Theme.text; horizontalAlignment: Text.AlignLeft; verticalAlignment: Text.AlignVCenter }
+                        }
+                        Button {
+                            Layout.fillWidth: true; height: 32
+                            leftPadding: 12; rightPadding: 12
+                            text: I18n.t("QQ 机器人", I18n.lang)
+                            onClicked: scrollTo(cardQ)
+                            background: Rectangle {
+                                radius: 6
+                                color: currentSection === "bot" ? Theme.accentSoft : (parent.hovered ? Theme.panelAlt : "transparent")
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+                            contentItem: Label { text: parent.text; color: currentSection === "bot" ? Theme.accent : Theme.text; horizontalAlignment: Text.AlignLeft; verticalAlignment: Text.AlignVCenter }
+                        }
+                        Button {
+                            Layout.fillWidth: true; height: 32
+                            leftPadding: 12; rightPadding: 12
+                            text: I18n.t("备份与定时", I18n.lang)
+                            onClicked: scrollTo(cardBack)
+                            background: Rectangle {
+                                radius: 6
+                                color: currentSection === "backup" ? Theme.accentSoft : (parent.hovered ? Theme.panelAlt : "transparent")
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+                            contentItem: Label { text: parent.text; color: currentSection === "backup" ? Theme.accent : Theme.text; horizontalAlignment: Text.AlignLeft; verticalAlignment: Text.AlignVCenter }
+                        }
+                        Button {
+                            Layout.fillWidth: true; height: 32
+                            leftPadding: 12; rightPadding: 12
+                            text: I18n.t("运维与通知", I18n.lang)
+                            onClicked: scrollTo(cardO)
+                            background: Rectangle {
+                                radius: 6
+                                color: currentSection === "ops" ? Theme.accentSoft : (parent.hovered ? Theme.panelAlt : "transparent")
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+                            contentItem: Label { text: parent.text; color: currentSection === "ops" ? Theme.accent : Theme.text; horizontalAlignment: Text.AlignLeft; verticalAlignment: Text.AlignVCenter }
+                        }
+
+                        Item { Layout.fillHeight: true }
+                        Label { text: "Minecraft Server Manager"; color: Theme.textMuted; font.pixelSize: 11 }
+                    }
+            }
+
+            Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: Theme.border }
+
+            Flickable {
+                id: flick
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                contentWidth: width
+                contentHeight: col.height + 32
+                clip: true
+                ScrollBar.vertical: ScrollBar {}
+                onContentYChanged: {
+                    if (_navLock) {
+                        // 程序滚动动画期间保持锁定；到达目标位置（误差<2px）后才解锁
+                        if (Math.abs(flick.contentY - _navTarget) < 2) _navLock = false
+                        return
+                    }
+                    updateCurrent()
+                }
+                // 仅用户真实拖拽才解锁（Behavior 动画驱动的 moving 不触发 dragging）
+                onDraggingChanged: if (flick.dragging) _navLock = false
+                Behavior on contentY { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                ColumnLayout {
+                    id: col
+                    x: 16
+                    y: 16
+                    width: parent.width - 32
+                    spacing: 14
+                    // 内容高度变化（语言切换换行等）后重算当前分类，避免锚点错位
+                    onHeightChanged: if (!_navLock) updateCurrent()
+
+                    // 外观
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: Theme.radius
+                        color: Theme.panel
+                        implicitHeight: cardA.height + 32
+                        ColumnLayout {
+                            id: cardA
+                            x: 16; y: 16
+                            width: parent.width - 32
+                            spacing: 12
+                            Label { text: I18n.t("外观", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("深色模式", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                Switch {
+                                    id: darkToggle
+                                    checked: Theme.dark
+                                    onToggled: window.applyTheme(darkToggle.checked, Theme.accent)
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("主题色", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                RowLayout { spacing: 8
+                                    Repeater {
+                                        model: [
+                                            "#4f8cff", "#8a5cf6", "#ec4899", "#22c55e",
+                                            "#f59e0b", "#ef4444", "#06b6d4", "#14b8a6",
+                                            "#a855f7", "#eab308", "#3b82f6", "#64748b"
+                                        ]
+                                        Rectangle {
+                                            width: 26; height: 26; radius: 13
+                                            color: modelData
+                                            border.width: Theme.accent === modelData ? 3 : 1
+                                            border.color: Theme.accent === modelData ? Theme.text : "#00000022"
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: window.applyTheme(Theme.dark, modelData)
+                                            }
+                                        }
+                                    }
+                                    // 自定义任意颜色
+                                    Rectangle {
+                                        width: 26; height: 26; radius: 13
+                                        color: "transparent"
+                                        border.width: 1
+                                        border.color: Theme.border
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "＋"
+                                            color: Theme.textMuted
+                                            font.pixelSize: 16
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: colorDialog.open()
+                                        }
+                                    }
+                                }
+                            }
+                            // —— 个性化：背景图 + 背景音乐（用户从电脑选文件，HMCSM 复制到 skin 目录）——
+                            Label { text: I18n.t("个性化", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+
+                            // 壁纸：支持文件夹多图 + 顺序/随机轮换 + 程序内调序
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: I18n.t("壁纸", I18n.lang); color: Theme.text }
+
+                                // 操作行：选择文件夹 / 添加图片 / 清空 / 总开关
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    AccentButton { text: I18n.t("选择文件夹", I18n.lang); onClicked: bgFolderDialog.open() }
+                                    AccentButton { text: I18n.t("添加图片", I18n.lang); onClicked: bgFilesDialog.open() }
+                                    SubtleButton {
+                                        text: I18n.t("清空", I18n.lang)
+                                        enabled: settingsController.bgImageList.length > 0
+                                        onClicked: { settingsController.clearBgImages(); settingsController.apply() }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Switch {
+                                        checked: settingsController.bgEnabled
+                                        enabled: settingsController.bgImageList.length > 0
+                                        onToggled: { settingsController.bgEnabled = checked; settingsController.apply() }
+                                    }
+                                }
+
+                                // 文件夹路径提示
+                                Label {
+                                    text: settingsController.bgImageFolder
+                                          ? I18n.t("文件夹：", I18n.lang) + settingsController.bgImageFolder
+                                          : I18n.t("未选择文件夹（可手动添加图片）", I18n.lang)
+                                    color: Theme.textMuted; font.pixelSize: 11; wrapMode: Text.Wrap
+                                }
+
+                                // 播放列表（▶ 标记当前项；↑↓ 调整顺序，✕ 删除）
+                                ListView {
+                                    id: bgList
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: Math.min(180, contentHeight)
+                                    model: settingsController.bgImageList
+                                    clip: true
+                                    delegate: RowLayout {
+                                        width: bgList.width
+                                        spacing: 6
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: (index === settingsController.bgImageIndex ? "▶ " : "")
+                                                  + modelData.substring(Math.max(modelData.lastIndexOf('/'), modelData.lastIndexOf('\\')) + 1)
+                                            elide: Text.ElideMiddle
+                                            color: index === settingsController.bgImageIndex ? Theme.accent : Theme.text
+                                        }
+                                        SubtleButton { small: true; text: "↑"; enabled: index > 0; onClicked: { settingsController.moveBgImage(index, index - 1); settingsController.apply() } }
+                                        SubtleButton { small: true; text: "↓"; enabled: index < bgList.count - 1; onClicked: { settingsController.moveBgImage(index, index + 1); settingsController.apply() } }
+                                        SubtleButton { small: true; text: "✕"; onClicked: { settingsController.removeBgImage(index); settingsController.apply() } }
+                                    }
+                                }
+
+                                // 播放模式 + 切换间隔
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Label { text: I18n.t("播放模式", I18n.lang); color: Theme.text }
+                                    ComboBoxEx {
+                                        id: bgModeCombo
+                                        Layout.fillWidth: false
+                                        Layout.preferredWidth: 130
+                                        model: [I18n.t("顺序播放", I18n.lang), I18n.t("随机播放", I18n.lang)]
+                                        currentIndex: settingsController.bgImageMode === "random" ? 1 : 0
+                                        onActivated: {
+                                            settingsController.setBgImageMode(currentIndex === 1 ? "random" : "sequential")
+                                            settingsController.apply()
+                                        }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Label { text: I18n.t("切换间隔", I18n.lang); color: Theme.text }
+                                    SpinBoxEx {
+                                        id: bgIntervalSpin
+                                        from: 1; to: 1000000; stepSize: 1
+                                        value: settingsController.bgImageInterval
+                                        onValueChanged: { settingsController.setBgImageInterval(value); settingsController.apply() }
+                                        Layout.preferredWidth: 100
+                                    }
+                                    ComboBoxEx {
+                                        id: bgIntervalUnitCombo
+                                        Layout.fillWidth: false
+                                        Layout.preferredWidth: 96
+                                        model: [I18n.t("秒", I18n.lang), I18n.t("分钟", I18n.lang),
+                                                I18n.t("小时", I18n.lang), I18n.t("天", I18n.lang)]
+                                        currentIndex: {
+                                            var u = settingsController.bgImageIntervalUnit
+                                            return u === "sec" ? 0 : (u === "hour" ? 2 : (u === "day" ? 3 : 1))
+                                        }
+                                        onActivated: {
+                                            var units = ["sec", "min", "hour", "day"]
+                                            settingsController.setBgImageIntervalUnit(units[currentIndex])
+                                            settingsController.apply()
+                                        }
+                                    }
+                                }
+                                Label {
+                                    text: I18n.t("列表至少 2 张且已开启壁纸时才会自动轮换", I18n.lang)
+                                    color: Theme.textMuted; font.pixelSize: 11
+                                }
+                            }
+
+                            // 滑块1：界面控件透明度——控制所有控件（卡片/页签条/侧边栏按钮与文字图表等），最小值 0（全透）
+                            SliderEx {
+                                from: 0; to: 1; stepSize: 0.05
+                                value: appController.uiTransparency
+                                onMoved: appController.setUiTransparency(value)
+                            }
+                            Label {
+                                text: I18n.t("界面控件透明度（向右更不透明，向左全透明；标题栏不受影响）", I18n.lang)
+                                color: Theme.textMuted; font.pixelSize: 11
+                            }
+
+                            // 滑块2：区域底色透明度——控制主区域与侧边栏底色。
+                            // 主区域从 0（全透）到 1；侧边栏从 0.2 起始等比例到 1（二者同斜率偏移，等比联动）。
+                            SliderEx {
+                                from: 0; to: 1; stepSize: 0.05
+                                value: appController.bgLayerOpacity
+                                onMoved: appController.setBgLayerOpacity(value)
+                            }
+                            Label {
+                                text: I18n.t("区域底色透明度（主区域 0→不透明；侧边栏约 1.1 倍、0.2 起始）", I18n.lang)
+                                color: Theme.textMuted; font.pixelSize: 11
+                            }
+
+                            // 背景音乐
+                            RowLayout {
+                                Layout.fillWidth: true
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    Label { text: I18n.t("背景音乐", I18n.lang); color: Theme.text }
+                                    Label {
+                                        text: settingsController.bgmPath
+                                              ? I18n.t("已选择，将随 HMCSM 复制到皮肤目录", I18n.lang)
+                                              : I18n.t("未设置（点击右侧选择电脑中的音频文件）", I18n.lang)
+                                        color: Theme.textMuted; font.pixelSize: 11
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                                AccentButton {
+                                    text: I18n.t("选择音乐", I18n.lang)
+                                    onClicked: bgMusicDialog.open()
+                                }
+                                SubtleButton {
+                                    text: I18n.t("清除", I18n.lang)
+                                    enabled: settingsController.bgmPath
+                                    onClicked: { settingsController.clearSkinMusic(); settingsController.apply() }
+                                }
+                                Switch {
+                                    checked: appController.bgmEnabled
+                                    enabled: appController.bgmAvailable
+                                    onToggled: appController.setBgmEnabled(checked)
+                                }
+                            }
+
+                            // 背景音乐音量
+                            SliderEx {
+                                from: 0; to: 1; stepSize: 0.05
+                                value: appController.bgmVolume
+                                onMoved: appController.setBgmVolume(value)
+                            }
+
+                            // 标题栏自定义：先选排布方式，再按模式选图片 / 改文字
+                            Label { text: I18n.t("标题栏", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            // 1) 排布方式（最先选择）
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("排布方式", I18n.lang); color: Theme.text }
+                                ComboBoxEx {
+                                    id: titleLayoutCombo
+                                    Layout.preferredWidth: 200
+                                    model: [I18n.t("仅文字", I18n.lang), I18n.t("仅图片", I18n.lang), I18n.t("图片+文字混排", I18n.lang)]
+                                    currentIndex: settingsController.titleLayout === "image" ? 1 : (settingsController.titleLayout === "mixed" ? 2 : 0)
+                                    onActivated: {
+                                        var modes = ["text", "image", "mixed"]
+                                        settingsController.setTitleLayout(modes[currentIndex])
+                                        settingsController.apply()
+                                    }
+                                }
+                            }
+                            // 2) 仅图片 / 混排时可选图片
+                            ColumnLayout {
+                                visible: settingsController.titleLayout !== "text"
+                                Layout.fillWidth: true
+                                spacing: 4
+                                Label { text: I18n.t("标题图片", I18n.lang); color: Theme.text }
+                                TextField {
+                                    Layout.fillWidth: true
+                                    text: settingsController.titleImageUrl
+                                    readOnly: true
+                                    color: Theme.text
+                                    selectByMouse: true
+                                    background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                                }
+                                AccentButton { text: I18n.t("选择图片", I18n.lang); onClicked: titleImgDialog.open() }
+                                SubtleButton { text: I18n.t("清除", I18n.lang); enabled: settingsController.titleImagePath; onClicked: { settingsController.clearTitleImage(); settingsController.apply() } }
+                            }
+                            // 3) 仅文字 / 混排时可改文字
+                            RowLayout {
+                                visible: settingsController.titleLayout !== "image"
+                                Layout.fillWidth: true
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 2
+                                    Label { text: I18n.t("标题文字（留空=默认）", I18n.lang); color: Theme.text }
+                                    TextField {
+                                        Layout.fillWidth: true
+                                        text: settingsController.windowTitle
+                                        placeholderText: I18n.t("留空使用默认标题", I18n.lang)
+                                        placeholderTextColor: Theme.textMuted
+                                        selectByMouse: true
+                                        background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                                        onEditingFinished: { settingsController.setWindowTitle(text); settingsController.apply() }
+                                    }
+                                }
+                            }
+                            FileDialog {
+                                id: titleImgDialog
+                                title: I18n.t("选择标题栏图片", I18n.lang)
+                                nameFilters: ["图片 (*.png *.jpg *.jpeg *.bmp *.webp *.gif)"]
+                                fileMode: FileDialog.OpenFile
+                                onAccepted: { if (settingsController.importTitleImage(titleImgDialog.selectedFile)) settingsController.apply() }
+                            }
+
+                            FolderDialog {
+                                id: bgFolderDialog
+                                title: I18n.t("选择壁纸文件夹", I18n.lang)
+                                onAccepted: {
+                                    settingsController.setBgImageFolder(bgFolderDialog.folder)
+                                    settingsController.apply()
+                                }
+                            }
+                            FileDialog {
+                                id: bgFilesDialog
+                                title: I18n.t("添加壁纸图片", I18n.lang)
+                                nameFilters: ["图片 (*.png *.jpg *.jpeg *.bmp *.webp *.gif)"]
+                                fileMode: FileDialog.OpenFiles
+                                onAccepted: {
+                                    settingsController.addBgImages(bgFilesDialog.selectedFiles)
+                                    settingsController.apply()
+                                }
+                            }
+                            FileDialog {
+                                id: bgMusicDialog
+                                title: I18n.t("选择背景音乐", I18n.lang)
+                                nameFilters: ["音频 (*.mp3 *.ogg *.wav *.flac *.m4a)"]
+                                fileMode: FileDialog.OpenFile
+                                onAccepted: {
+                                    if (settingsController.importSkinMusic(bgMusicDialog.selectedFile))
+                                        settingsController.apply()
+                                }
+                            }
+                        }
+                    }
+
+                    // 语言与自启
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: Theme.radius
+                        color: Theme.panel
+                        implicitHeight: cardB.height + 32
+                        ColumnLayout {
+                            id: cardB
+                            x: 16; y: 16
+                            width: parent.width - 32
+                            spacing: 12
+                            Label { text: I18n.t("语言与自启", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("界面语言", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                ComboBoxEx {
+                                    id: langBox
+                                    Layout.fillWidth: false
+                                    model: ["简体中文", "English"]
+                                    onActivated: { settingsController.language = currentText; settingsController.apply() }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("开机自启", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                Switch {
+                                    checked: settingsController.autoStart
+                                    onToggled: { settingsController.autoStart = checked; settingsController.apply() }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("启动时显示窗口", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                Switch {
+                                    checked: settingsController.showOnStartup
+                                    onToggled: { settingsController.showOnStartup = checked; settingsController.apply() }
+                                }
+                            }
+                        }
+                    }
+
+                    // 默认服务器目录
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: Theme.radius
+                        color: Theme.panel
+                        implicitHeight: cardD.height + 32
+                        ColumnLayout {
+                            id: cardD
+                            x: 16; y: 16
+                            width: parent.width - 32
+                            spacing: 12
+                            Label { text: I18n.t("默认服务器目录", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                TextField {
+                                    id: dirField
+                                    text: settingsController.defaultServerDir
+                                    Layout.fillWidth: true
+                                    readOnly: true
+                                    color: Theme.text
+                                    background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                                }
+                                SubtleButton {
+                                    text: I18n.t("浏览", I18n.lang)
+                                    onClicked: dirDialog.open()
+                                }
+                FolderDialog {
+                    id: dirDialog
+                    currentFolder: "file:///" + settingsController.defaultServerDir
+                    onAccepted: {
+                        // selectedFolder 是 file:/// URL，交给 C++ setter 统一去前缀
+                        settingsController.defaultServerDir = selectedFolder.toString()
+                        dirField.text = settingsController.defaultServerDir
+                    }
+                }
+                            }
+                        }
+                    }
+
+                    // WebUI
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: Theme.radius
+                        color: Theme.panel
+                        implicitHeight: cardC.height + 32
+                        ColumnLayout {
+                            id: cardC
+                            x: 16; y: 16
+                            width: parent.width - 32
+                            spacing: 12
+                            Label { text: I18n.t("WebUI", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("启用 WebUI", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                Switch {
+                                    checked: settingsController.webuiEnabled
+                                    onToggled: { settingsController.webuiEnabled = checked; settingsController.apply() }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("WebUI 端口", I18n.lang); color: Theme.text }
+                            Item {
+                                id: portSpin
+                                Layout.preferredHeight: 30
+                                implicitWidth: 96
+                                // 大整体：四角圆角
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: 6
+                                    color: Theme.panelAlt
+                                    border.color: Theme.border
+                                    clip: true
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        spacing: 0
+                                        // 数字显示 / 输入
+                                        TextInput {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            Layout.preferredWidth: 14
+                                            leftPadding: 10
+                                            text: settingsController.webuiPort
+                                            color: Theme.text
+                                            verticalAlignment: Text.AlignVCenter
+                                            horizontalAlignment: Qt.AlignLeft
+                                            selectByMouse: true
+                                            validator: IntValidator { bottom: 1; top: 65535 }
+                                            onEditingFinished: {
+                                                var v = parseInt(text, 10)
+                                                if (!isNaN(v)) {
+                                                    v = Math.min(65535, Math.max(1, v))
+                                                    settingsController.webuiPort = v
+                                                    settingsController.apply()
+                                                }
+                                            }
+                                        }
+                                        // 数字区与按键组之间的分隔线
+                                        Rectangle { Layout.fillHeight: true; Layout.preferredWidth: 1; color: Theme.border }
+                                        // 按键组
+                                        ColumnLayout {
+                                            spacing: 0
+                                            Layout.fillHeight: true
+                                            Layout.fillWidth: true
+                                            Layout.preferredWidth: 1
+                                            Layout.minimumWidth: 22
+                                            Layout.maximumWidth: 28
+                                            Button {
+                                                Layout.fillWidth: true; Layout.fillHeight: true
+                                                flat: true
+                                                background: Rectangle { color: parent.hovered ? Theme.accentSoft : "transparent" }
+                                                onClicked: stepPort(1)
+                                                contentItem: Text { text: "+"; color: Theme.text; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                            }
+                                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.border }
+                                            Button {
+                                                Layout.fillWidth: true; Layout.fillHeight: true
+                                                flat: true
+                                                background: Rectangle { color: parent.hovered ? Theme.accentSoft : "transparent" }
+                                                onClicked: stepPort(-1)
+                                                contentItem: Text { text: "−"; color: Theme.text; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                            }
+                                        }
+                                    }
+                                }
+                                function stepPort(d) {
+                                    var v = Math.min(65535, Math.max(1, settingsController.webuiPort + d))
+                                    settingsController.webuiPort = v
+                                    settingsController.apply()
+                                }
+                            }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: I18n.t("运行状态", I18n.lang); color: Theme.textMuted }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: webuiServer.running
+                                          ? I18n.t("运行中 · %2://localhost:%1", I18n.lang).arg(webuiServer.port).arg(webuiServer.https ? "https" : "http")
+                                          : (settingsController.webuiEnabled
+                                             ? I18n.t("启动失败：%1", I18n.lang).arg(webuiServer.error)
+                                             : I18n.t("未启用", I18n.lang))
+                                    color: webuiServer.running ? Theme.accent : Theme.textMuted
+                                    elide: Text.ElideRight
+                                }
+                                AccentButton {
+                                    text: I18n.t("打开", I18n.lang)
+                                    enabled: webuiServer.running
+                                    onClicked: Qt.openUrlExternally((webuiServer.https ? "https" : "http") + "://localhost:" + webuiServer.port + "/?token=" + encodeURIComponent(settingsController.webuiToken))
+                                }
+                            }
+
+                            // 访问令牌（所有接口必须携带，防止局域网内任意设备控制服务器）
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("访问令牌", I18n.lang); color: Theme.text }
+                                TextField {
+                                    id: tokenField
+                                    Layout.fillWidth: true
+                                    readOnly: true
+                                    text: settingsController.webuiToken
+                                    color: Theme.text
+                                    font.family: "Consolas, Menlo, monospace"
+                                    selectByMouse: true
+                                    background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                                }
+                                SubtleButton {
+                                    text: I18n.t("复制", I18n.lang)
+                                    onClicked: { tokenField.selectAll(); tokenField.copy(); toast(I18n.t("已复制访问令牌", I18n.lang)) }
+                                }
+                                SubtleButton {
+                                    text: I18n.t("重新生成", I18n.lang)
+                                    onClicked: settingsController.regenerateWebuiToken()
+                                }
+                            }
+
+                            // 暴露到局域网（默认仅本机；开启后需令牌，且有被扫描风险）
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: I18n.t("暴露到局域网", I18n.lang)
+                                    color: Theme.text
+                                    wrapMode: Text.Wrap
+                                }
+                                Switch {
+                                    checked: settingsController.webuiExposeLan
+                                    onToggled: {
+                                        settingsController.webuiExposeLan = checked
+                                        settingsController.apply()
+                                        if (webuiServer.running) webuiServer.rebind()
+                                    }
+                                }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: I18n.t("默认仅本机(127.0.0.1)可访问，最为安全。开启“暴露到局域网”后将监听 0.0.0.0，局域网/手机可访问，但必须凭访问令牌，且存在被扫描的风险。", I18n.lang)
+                                color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap
+                            }
+
+                            // 移动端配对（主入口）：生成配对码 → 手机扫码直连本机控制台
+                            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+                            Label { text: I18n.t("移动端配对", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            RowLayout {
+                                Layout.fillWidth: true; spacing: 8
+                                Label { text: I18n.t("配对状态", I18n.lang); color: Theme.textMuted }
+                                Label { text: webuiServer.paired ? I18n.t("已配对", I18n.lang) : I18n.t("未配对", I18n.lang); color: webuiServer.paired ? Theme.success : Theme.textMuted }
+                                Label { text: I18n.t("连接状态", I18n.lang); color: Theme.textMuted }
+                                Label { text: webuiServer.mobileConnected ? I18n.t("已连接", I18n.lang) : I18n.t("未连接", I18n.lang); color: webuiServer.mobileConnected ? Theme.accent : Theme.textMuted }
+                                Item { Layout.fillWidth: true }
+                                AccentButton { text: I18n.t("生成配对码", I18n.lang); onClicked: { webuiServer.generatePairCode(); refreshPairQr() } }
+                            }
+                            Rectangle {
+                                Layout.alignment: Qt.AlignLeft
+                                width: 200; height: 200; color: "#ffffff"; radius: 6
+                                Image { id: pairQrImg; anchors.fill: parent; anchors.margins: 10; fillMode: Image.PreserveAspectFit; cache: false }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: webuiServer.pairUri()
+                                color: Theme.textMuted; font.pixelSize: 10; elide: Text.ElideMiddle; wrapMode: Text.Wrap
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: I18n.t("用手机 App 的“扫码连接”扫描上方二维码。确保手机与本机在同一局域网，且 WebUI 已启用。", I18n.lang)
+                                color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap
+                            }
+
+                            // 远控端「配对/连接」：两端共用同一 QML。主机端(桌面)显示"配对"、客户端(远控)显示"连接"，
+                            // 用 visible 按 isRemoteEnd 切换（Layout 会忽略不可见项，布局不受影响）；
+                            // 对端不存在的上下文对象用 null 安全访问（typeof 判定），避免绑定报错。
+                            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+
+                            // —— 主机端(桌面)：生成配对码 / 已配对设备列表 ——
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                visible: !isRemoteEnd
+                                spacing: 8
+                                readonly property var rc: (typeof remoteControl !== "undefined") ? remoteControl : null
+                                Label { text: I18n.t("远控端配对", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 8
+                                    Label { text: I18n.t("已配对设备", I18n.lang); color: Theme.textMuted }
+                                    Label { text: String(rc ? rc.deviceCount : 0); color: Theme.accent; font.bold: true }
+                                    Item { Layout.fillWidth: true }
+                                    AccentButton { text: I18n.t("生成配对码", I18n.lang); onClicked: { if (rc) rc.generatePairCode() } }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 12
+                                    Rectangle {
+                                        Layout.alignment: Qt.AlignLeft
+                                        width: 200; height: 200; color: "#ffffff"; radius: 6
+                                        Image {
+                                            anchors.fill: parent; anchors.margins: 10; fillMode: Image.PreserveAspectFit; cache: false
+                                            source: (rc && rc.pairing) ? ("image://qr/" + encodeURIComponent(rc.pairUri)) : ""
+                                        }
+                                    }
+                                    ColumnLayout { spacing: 6; Layout.fillWidth: true
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: (rc && rc.pairing) ? rc.pairUri : I18n.t("点击“生成配对码”后此处显示二维码与连接串", I18n.lang)
+                                            color: Theme.textMuted; font.pixelSize: 10; elide: Text.ElideMiddle; wrapMode: Text.Wrap
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: I18n.t("远控端在「连接」页粘贴上方连接串（或手动输入配对码）即可配对。配对后即使重置 WebUI 访问令牌，远控端也能凭设备凭证直接重连。", I18n.lang)
+                                            color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap
+                                        }
+                                    }
+                                }
+                                // 已配对设备列表
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 6
+                                    Repeater {
+                                        model: rc ? rc.devices : []
+                                        delegate: Rectangle {
+                                            Layout.fillWidth: true; height: 40; radius: 6
+                                            color: Theme.panelAlt; border.color: Theme.border
+                                            RowLayout {
+                                                anchors.fill: parent; anchors.margins: 8; spacing: 8
+                                                Label { text: modelData.name; color: Theme.text; font.bold: true }
+                                                Label { text: "(" + (modelData.platform || "?") + ")"; color: Theme.textMuted; font.pixelSize: 11 }
+                                                Item { Layout.fillWidth: true }
+                                                SubtleButton { text: I18n.t("撤销", I18n.lang); onClicked: { if (rc) rc.revokeDevice(modelData.id) } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // —— 客户端(远控)：本机与本地端的连接状态 / 重新配对 ——
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                visible: isRemoteEnd
+                                spacing: 8
+                                readonly property var rm: (typeof remote !== "undefined") ? remote : null
+                                Label { text: I18n.t("远控端连接", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                                GridLayout {
+                                    columns: 2; Layout.fillWidth: true; columnSpacing: 10; rowSpacing: 4
+                                    Label { text: I18n.t("连接状态", I18n.lang); color: Theme.textMuted }
+                                    Label { text: (rm && rm.connected) ? I18n.t("已连接", I18n.lang) : I18n.t("未连接", I18n.lang); color: (rm && rm.connected) ? Theme.success : Theme.danger }
+                                    Label { text: I18n.t("配对设备", I18n.lang); color: Theme.textMuted }
+                                    Label { text: (rm && rm.paired) ? rm.deviceName : I18n.t("未配对", I18n.lang); color: (rm && rm.paired) ? Theme.accent : Theme.textMuted }
+                                    Label { text: I18n.t("本地端地址", I18n.lang); color: Theme.textMuted }
+                                    Label { text: (rm && rm.connected) ? (rm.host + ":" + rm.port) : "-"; color: Theme.text }
+                                    Label { text: I18n.t("最近错误", I18n.lang); color: Theme.textMuted }
+                                    Label { text: (rm && rm.lastError) ? rm.lastError : "-"; color: Theme.danger; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                                }
+                                AccentButton { text: I18n.t("重新配对 / 断开", I18n.lang); accentColor: Theme.danger; onClicked: { if (rm) rm.forgetPair() } }
+                            }
+
+                            // 自定义证书（可选，留空则用自动生成的自签证书）
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("证书文件(可选)", I18n.lang); color: Theme.text }
+                                TextField {
+                                    id: certField
+                                    Layout.fillWidth: true
+                                    text: settingsController.webuiCertPath
+                                    color: Theme.text
+                                    placeholderText: I18n.t("留空=自动自签证书", I18n.lang)
+                                    placeholderTextColor: Theme.textMuted
+                                    selectByMouse: true
+                                    selectionColor: Theme.accent
+                                    background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                                    onEditingFinished: { settingsController.webuiCertPath = text; settingsController.apply() }
+                                }
+                                SubtleButton {
+                                    text: I18n.t("浏览", I18n.lang)
+                                    onClicked: certDialog.open()
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("私钥文件(可选)", I18n.lang); color: Theme.text }
+                                TextField {
+                                    id: keyField
+                                    Layout.fillWidth: true
+                                    text: settingsController.webuiKeyPath
+                                    color: Theme.text
+                                    placeholderText: I18n.t("留空=自动自签证书", I18n.lang)
+                                    placeholderTextColor: Theme.textMuted
+                                    selectByMouse: true
+                                    selectionColor: Theme.accent
+                                    background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                                    onEditingFinished: { settingsController.webuiKeyPath = text; settingsController.apply() }
+                                }
+                                SubtleButton {
+                                    text: I18n.t("浏览", I18n.lang)
+                                    onClicked: keyDialog.open()
+                                }
+                            }
+
+                            Label { text: I18n.t("启用后 WebUI 会以 HTTPS 启动管理面板（自签证书，浏览器会提示“不安全”，点继续即可），所有接口需携带访问令牌。令牌可在手机/其他设备首次打开时输入或随链接自动带入。", I18n.lang); color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+
+                        }
+                    }
+
+                    // QQ 机器人（NapCat + NoneBot，独立于 WebUI）
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: Theme.radius
+                        color: Theme.panel
+                        implicitHeight: cardQ.height + 32
+                        ColumnLayout {
+                            id: cardQ
+                            x: 16; y: 16
+                            width: parent.width - 32
+                            spacing: 12
+                            Label { text: I18n.t("QQ 机器人", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            Label { text: I18n.t("NapCat 是 QQ 协议端（OneBot 客户端），NoneBot 是机器人框架（加载 hmcsm_control 插件）。两者已绑定，一起开、一起关，与 WebUI 互不影响。", I18n.lang); color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("联动启动", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                Switch {
+                                    checked: settingsController.botLinkedStart
+                                    onToggled: { settingsController.botLinkedStart = checked; settingsController.apply() }
+                                }
+                            }
+                            Label { text: I18n.t("开启时由 HMCSM 一并拉起 NapCat 与 NoneBot；关闭则 HMCSM 只开放控制通道，由你自行启动机器人并连入（默认关闭）。", I18n.lang); color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("启用 QQ 机器人", I18n.lang); Layout.fillWidth: true; color: Theme.text; font.bold: true }
+                                Switch {
+                                    checked: settingsController.botEnabled
+                                    onToggled: { settingsController.botEnabled = checked; settingsController.apply() }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("NapCat 路径", I18n.lang); color: Theme.text }
+                                ComboBoxEditable {
+                                    id: napcatCombo
+                                    model: botController.detectNapcatPaths()
+                                    onEditTextChanged: { if (editText !== settingsController.napcatPath) { settingsController.napcatPath = editText; settingsController.apply() } }
+                                }
+                                AccentButton {
+                                    text: I18n.t("自动检测", I18n.lang)
+                                    onClicked: {
+                                        var paths = botController.detectNapcatPaths()
+                                        var p = botController.detectNapcatPath()
+                                        napcatHint.text = ""
+                                        if (p) {
+                                            // 刷新候选列表，并直写编辑框文本（不依赖 currentIndex/绑定，保证一定填充）
+                                            if (paths.indexOf(p) < 0) paths.push(p)
+                                            napcatCombo.model = paths
+                                            napcatCombo.setText(p)
+                                            if (settingsController.napcatPath !== p) {
+                                                settingsController.napcatPath = p
+                                                settingsController.apply()
+                                            }
+                                        } else {
+                                            napcatHint.text = I18n.t("未检测到 NapCat，请手动输入路径或浏览选择", I18n.lang)
+                                        }
+                                    }
+                                }
+                                SubtleButton {
+                                    text: I18n.t("浏览", I18n.lang)
+                                    onClicked: napcatDialog.open()
+                                }
+                                Component.onCompleted: {
+                                    napcatCombo.setText(settingsController.napcatPath)
+                                    nonebotCombo.setText(settingsController.nonebotDir)
+                                }
+                            }
+                            Label {
+                                id: napcatHint
+                                text: ""
+                                color: Theme.accent
+                                font.pixelSize: 12
+                                wrapMode: Text.Wrap
+                                Layout.fillWidth: true
+                                visible: text !== ""
+                            }
+                            Label { text: I18n.t("NapCat 需要扫码登录，启动后会弹出独立控制台窗口，扫码后 QQ 消息才能互通。", I18n.lang); color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: I18n.t("运行状态", I18n.lang); color: Theme.textMuted }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: {
+                                        if (!settingsController.botEnabled) return I18n.t("未启用", I18n.lang)
+                                        var s = botController.napcatState
+                                        if (s === "running") return I18n.t("运行中", I18n.lang)
+                                        if (s === "starting") return I18n.t("启动中", I18n.lang)
+                                        if (s === "external") return I18n.t("外部运行（由你自行启动）", I18n.lang)
+                                        if (s === "stopped") return I18n.t("已停止", I18n.lang)
+                                        return s
+                                    }
+                                    color: botController.napcatState === "running" ? Theme.accent : Theme.textMuted
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.border }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("NoneBot 目录", I18n.lang); color: Theme.text }
+                                ComboBoxEditable {
+                                    id: nonebotCombo
+                                    model: botController.detectNonebotDirs()
+                                    onEditTextChanged: { if (editText !== settingsController.nonebotDir) { settingsController.nonebotDir = editText; settingsController.apply() } }
+                                }
+                                AccentButton {
+                                    text: I18n.t("自动检测", I18n.lang)
+                                    onClicked: {
+                                        var dirs = botController.detectNonebotDirs()
+                                        var d = botController.detectNonebotDir()
+                                        nonebotHint.text = ""
+                                        if (d) {
+                                            // 刷新候选列表，并直写编辑框文本（不依赖 currentIndex/绑定，保证一定填充）
+                                            if (dirs.indexOf(d) < 0) dirs.push(d)
+                                            nonebotCombo.model = dirs
+                                            nonebotCombo.setText(d)
+                                            if (settingsController.nonebotDir !== d) {
+                                                settingsController.nonebotDir = d
+                                                settingsController.apply()
+                                            }
+                                        } else {
+                                            nonebotHint.text = I18n.t("未检测到 NoneBot，请手动输入目录或浏览选择", I18n.lang)
+                                        }
+                                    }
+                                }
+                                SubtleButton {
+                                    text: I18n.t("浏览", I18n.lang)
+                                    onClicked: nonebotDialog.open()
+                                }
+                            }
+                            Label {
+                                id: nonebotHint
+                                text: ""
+                                color: Theme.accent
+                                font.pixelSize: 12
+                                wrapMode: Text.Wrap
+                                Layout.fillWidth: true
+                                visible: text !== ""
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("hmcsm 控制插件", I18n.lang); color: Theme.text }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: {
+                                        var st = botController.hmcsmPluginState
+                                        if (st === "ok") return I18n.t("已安装", I18n.lang)
+                                        if (st === "missing") return I18n.t("未安装（机器人将无法控制服务器）", I18n.lang)
+                                        if (st === "installing") return I18n.t("安装中…", I18n.lang)
+                                        if (st === "error") return I18n.t("安装失败", I18n.lang)
+                                        return I18n.t("未知", I18n.lang)
+                                    }
+                                    color: botController.hmcsmPluginState === "ok" ? Theme.accent : (botController.hmcsmPluginState === "error" ? "#e06c5a" : Theme.textMuted)
+                                    elide: Text.ElideRight
+                                }
+                                AccentButton {
+                                    text: I18n.t("安装 / 重装", I18n.lang)
+                                    onClicked: openHmcsmInstall()
+                                }
+                            }
+                            Label { text: I18n.t("HMCSM 默认不主动推送：常态按间隔把设备占用(CPU/内存)更新到机器人 QQ 昵称，服务器异常退出时把日志私信管理员，其余只在执行指令后回传反馈。两者绑定运行，一起开/一起关。", I18n.lang); color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("昵称状态更新间隔(秒)", I18n.lang); color: Theme.text }
+                                TextField {
+                                    text: settingsController.botUsageInterval
+                                    Layout.preferredWidth: 90
+                                    validator: IntValidator { bottom: 0; top: 86400 }
+                                    color: Theme.text
+                                    background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                                    onEditingFinished: { settingsController.botUsageInterval = Number(text); settingsController.apply() }
+                                }
+                                Label { text: I18n.t("0=关闭", I18n.lang); color: Theme.textMuted; font.pixelSize: 12 }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: I18n.t("运行状态", I18n.lang); color: Theme.textMuted }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: {
+                                        if (!settingsController.botEnabled) return I18n.t("未启用", I18n.lang)
+                                        var s = botController.nonebotState
+                                        if (s === "running") return I18n.t("运行中", I18n.lang)
+                                        if (s === "starting") return I18n.t("启动中", I18n.lang)
+                                        if (s === "waiting") return I18n.t("等待连接", I18n.lang)
+                                        if (s === "stopped") return I18n.t("已停止", I18n.lang)
+                                        return s
+                                    }
+                                    color: botController.nonebotState === "running" ? Theme.accent : Theme.textMuted
+                                    elide: Text.ElideRight
+                                }
+                                SubtleButton {
+                                    text: I18n.t("测试推送", I18n.lang)
+                                    enabled: botController.botEnabled
+                                    onClicked: botController.notify(I18n.t("这是一条来自 HMCSM 的测试推送", I18n.lang))
+                                }
+                            }
+
+                            // ===== 控制通道（机器人链路）保护：锁定本机 + 与 WebUI 共用令牌 =====
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.border }
+                            Label { text: I18n.t("控制通道（机器人链路）", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 13 }
+                            Label {
+                                text: I18n.t("已锁定本机 127.0.0.1:%1，仅本机可连、远程不可达；本机其他进程也须凭访问令牌，HMCSM 已自动注入 NapCat / NoneBot 插件配置。", I18n.lang).arg(botController.controlPort)
+                                color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Label { text: I18n.t("控制通道状态", I18n.lang); color: Theme.textMuted }
+                                Label { Layout.fillWidth: true; text: I18n.t("已锁定本机 + 令牌校验（最安全）", I18n.lang); color: Theme.accent; elide: Text.ElideRight }
+                                SubtleButton {
+                                    text: I18n.t("复制令牌", I18n.lang)
+                                    onClicked: { Clipboard.text = settingsController.webuiToken; toast(I18n.t("已复制访问令牌", I18n.lang)) }
+                                }
+                            }
+                        }
+                    }
+
+                    // 备份与定时
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: Theme.radius
+                        color: Theme.panel
+                        implicitHeight: cardBack.height + 32
+                        ColumnLayout {
+                            id: cardBack
+                            x: 16; y: 16
+                            width: parent.width - 32
+                            spacing: 12
+                            Label { text: I18n.t("备份与定时", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            Label { text: I18n.t("定时把服务端目录打包备份，按保留份数滚动删除最旧备份（备份文件位于 AppData 下的 HMCSM/backups）。", I18n.lang); color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("启用定时备份", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                Switch { checked: backupController.enabled; onToggled: backupController.enabled = checked }
+                            }
+                            RowLayout { spacing: 6
+                                Label { text: I18n.t("备份间隔(小时)", I18n.lang); color: Theme.text }
+                                SpinBoxEx { from: 1; to: 168; value: backupController.intervalHours; onValueChanged: if (value !== backupController.intervalHours) backupController.intervalHours = value }
+                                Label { text: I18n.t("保留份数", I18n.lang); color: Theme.text }
+                                SpinBoxEx { from: 1; to: 50; value: backupController.retain; onValueChanged: if (value !== backupController.retain) backupController.retain = value }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("启动时也备份一次", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                Switch { checked: backupController.onStart; onToggled: backupController.onStart = checked }
+                            }
+                            Label {
+                                text: backupController.lastBackup > 0
+                                      ? I18n.t("上次备份：%1", I18n.lang).arg(new Date(backupController.lastBackup).toLocaleString(Qt.locale(), Locale.ShortFormat))
+                                      : I18n.t("尚无备份记录", I18n.lang)
+                                color: Theme.textMuted; font.pixelSize: 12
+                            }
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.border }
+                            Label { text: I18n.t("定时启停 / 定时备份：在每台服务器的详情页点「定时任务」里按 启动/停止/备份 + 时间 配置（全局统一调度）。", I18n.lang); color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                        }
+                    }
+
+                    // 运维与通知
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: Theme.radius
+                        color: Theme.panel
+                        implicitHeight: cardO.height + 32
+                        ColumnLayout {
+                            id: cardO
+                            x: 16; y: 16
+                            width: parent.width - 32
+                            spacing: 12
+                            Label { text: I18n.t("运维与通知", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 15 }
+                            Label { text: I18n.t("Webhook 通知：崩溃、启停、玩家进服时向群/频道推送。", I18n.lang); color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: I18n.t("启用 Webhook", I18n.lang); Layout.fillWidth: true; color: Theme.text }
+                                Switch { checked: settingsController.webhookEnabled; onToggled: { settingsController.webhookEnabled = checked; settingsController.apply() } }
+                                Label { text: I18n.t("类型", I18n.lang); color: Theme.text }
+                                ComboBoxEx {
+                                    Layout.fillWidth: false
+                                    Layout.preferredWidth: 130
+                                    model: [I18n.t("Discord", I18n.lang), I18n.t("企业微信", I18n.lang), I18n.t("通用 JSON", I18n.lang)]
+                                    Component.onCompleted: {
+                                        var m = ["discord", "wecom", "generic"]
+                                        currentIndex = Math.max(0, m.indexOf(settingsController.webhookType))
+                                    }
+                                    onCurrentIndexChanged: {
+                                        var m = ["discord", "wecom", "generic"]
+                                        var v = m[currentIndex]
+                                        if (v !== settingsController.webhookType) { settingsController.webhookType = v; settingsController.apply() }
+                                    }
+                                }
+                            }
+                            TextField {
+                                Layout.fillWidth: true
+                                placeholderText: I18n.t("Webhook 地址（https://...）", I18n.lang)
+                                text: settingsController.webhookUrl
+                                color: Theme.text
+                                background: Rectangle { color: Theme.panelAlt; radius: 6; border.color: Theme.border }
+                                onEditingFinished: { settingsController.webhookUrl = text; settingsController.apply() }
+                            }
+                            Label { text: I18n.t("通知事件", I18n.lang); color: Theme.text; font.pixelSize: 12 }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 12
+                                RowLayout { spacing: 6
+                                    Switch { checked: settingsController.webhookCrash; onToggled: { settingsController.webhookCrash = checked; settingsController.apply() } }
+                                    Label { text: I18n.t("崩溃", I18n.lang); color: Theme.text }
+                                }
+                                RowLayout { spacing: 6
+                                    Switch { checked: settingsController.webhookState; onToggled: { settingsController.webhookState = checked; settingsController.apply() } }
+                                    Label { text: I18n.t("启停", I18n.lang); color: Theme.text }
+                                }
+                                RowLayout { spacing: 6
+                                    Switch { checked: settingsController.webhookPlayer; onToggled: { settingsController.webhookPlayer = checked; settingsController.apply() } }
+                                    Label { text: I18n.t("玩家进服", I18n.lang); color: Theme.text }
+                                }
+                            }
+
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.border }
+
+                            Label { text: I18n.t("后端崩溃自动重启", I18n.lang); color: Theme.text; font.bold: true; font.pixelSize: 13 }
+                            RowLayout { Layout.fillWidth: true
+                                Switch { checked: serverController.autoRestart; onToggled: { serverController.autoRestart = checked } }
+                                Label { text: I18n.t("崩溃后自动重拉起后端（指数退避）", I18n.lang); color: Theme.text; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                            }
+                            RowLayout { spacing: 6
+                                Label { text: I18n.t("最大重试", I18n.lang); color: Theme.text }
+                                SpinBoxEx { from: 0; to: 50; value: serverController.maxRetries; onValueChanged: if (value !== serverController.maxRetries) serverController.maxRetries = value }
+                                Label { text: I18n.t("退避基数(秒)", I18n.lang); color: Theme.text }
+                                SpinBoxEx { from: 1; to: 300; value: serverController.backoffSec; onValueChanged: if (value !== serverController.backoffSec) serverController.backoffSec = value }
+                            }
+                        }
+                    }
+
+                    Item { Layout.fillHeight: true }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AccentButton {
+                            text: I18n.t("打开下载中心", I18n.lang)
+                            onClicked: appController.openDownloadCenter()
+                        }
+                        SubtleButton {
+                            text: I18n.t("导入整合包", I18n.lang)
+                            onClicked: appController.openImportModpack()
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                }
+            }
+        }
+        }
+    }
+
+    ColorDialog {
+        id: colorDialog
+        title: I18n.t("选择主题色", I18n.lang)
+        onAccepted: window.applyTheme(Theme.dark, colorDialog.selectedColor)
+    }
+
+    FileDialog {
+        id: certDialog
+        title: I18n.t("选择证书文件", I18n.lang)
+        nameFilters: ["PEM/CRT (*.pem *.crt *.cer)", "All files (*)"]
+        onAccepted: {
+            settingsController.webuiCertPath = certDialog.selectedFile.toString()
+            settingsController.apply()
+            certField.text = settingsController.webuiCertPath
+        }
+    }
+    FileDialog {
+        id: keyDialog
+        title: I18n.t("选择私钥文件", I18n.lang)
+        nameFilters: ["Key (*.pem *.key)", "All files (*)"]
+        onAccepted: {
+            settingsController.webuiKeyPath = keyDialog.selectedFile.toString()
+            settingsController.apply()
+            keyField.text = settingsController.webuiKeyPath
+        }
+    }
+    FileDialog {
+        id: napcatDialog
+        title: I18n.t("选择 NapCat 入口（napcat.bat）", I18n.lang)
+        nameFilters: ["NapCat (napcat.bat)", "*.bat", "*.exe", "All files (*)"]
+                                onAccepted: {
+                                    settingsController.napcatPath = napcatDialog.selectedFile.toString()
+                                    settingsController.apply()
+                                    napcatCombo.setText(settingsController.napcatPath)
+                                }
+    }
+    FolderDialog {
+        id: nonebotDialog
+        onAccepted: {
+            settingsController.nonebotDir = nonebotDialog.selectedFolder.toString()
+            settingsController.apply()
+            nonebotCombo.setText(settingsController.nonebotDir)
+        }
+    }
+
+    function openHmcsmInstall() { hmcsmPluginDialog.open() }
+
+    Connections {
+        target: botController
+        function onPluginMissing() { hmcsmPluginDialog.open() }
+    }
+
+    Dialog {
+        id: hmcsmPluginDialog
+        title: I18n.t("hmcsm 控制插件", I18n.lang)
+        modal: true
+        standardButtons: Dialog.NoButton
+        width: 540
+        contentItem: Rectangle {
+            color: Theme.bg
+            implicitWidth: 540
+            implicitHeight: dlgCol.implicitHeight + 28
+            ColumnLayout {
+                id: dlgCol
+                anchors.fill: parent
+                anchors.margins: 14
+                spacing: 10
+                Label {
+                    text: I18n.t("当前 NoneBot 目录未接入 hmcsm_control 控制插件，机器人将无法通过 QQ 控制 Minecraft 服务器。", I18n.lang)
+                    color: Theme.text; wrapMode: Text.Wrap; Layout.fillWidth: true
+                }
+                Label {
+                    text: I18n.t("方式一（推荐）：自动安装 —— HMCSM 会把自带的 hmcsm_control 插件复制到该目录并写入 pyproject 配置。", I18n.lang)
+                    color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true
+                }
+                Label {
+                    text: I18n.t("方式二：手动安装 —— 自行用 nb plugin install 安装 hmcsm_control，或把 HMCSM 自带 qqbot/plugins/hmcsm_control.py 放入该目录的 plugins/ 并配置 pyproject。", I18n.lang)
+                    color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignRight
+                    spacing: 8
+                    AccentButton {
+                        text: I18n.t("自动安装", I18n.lang)
+                        onClicked: {
+                            if (botController.installHmcsmPlugin())
+                                hmcsmPluginDialog.close()
+                            else
+                                hmcsmResult.text = I18n.t("安装失败：请查看程序日志，或改用手动安装。", I18n.lang)
+                        }
+                    }
+                    SubtleButton {
+                        text: I18n.t("我已手动装好，重试", I18n.lang)
+                        onClicked: { hmcsmPluginDialog.close(); botController.retryStartNonebot() }
+                    }
+                    SubtleButton {
+                        text: I18n.t("取消", I18n.lang)
+                        onClicked: hmcsmPluginDialog.close()
+                    }
+                }
+                Label { id: hmcsmResult; color: "#e06c5a"; wrapMode: Text.Wrap; Layout.fillWidth: true; text: "" }
+            }
+        }
+    }
+
+    // 轻量提示（如“已复制”）：跟随本窗口底部居中显示
+    Rectangle {
+        id: csToastBox
+        visible: false
+        z: 9999
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 48
+        width: csToastLabel.implicitWidth + 28
+        height: csToastLabel.implicitHeight + 14
+        radius: Theme.radius
+        color: Theme.success
+        Text { id: csToastLabel; anchors.centerIn: parent; text: window.toastMsg; color: "#ffffff"; font.pixelSize: 13 }
+    }
+    Timer { id: csToastTimer; interval: 2800; onTriggered: csToastBox.visible = false }
+}

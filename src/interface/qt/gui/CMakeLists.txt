@@ -35,13 +35,23 @@ endif()
 # GLOB + CONFIGURE_DEPENDS：新增 .qml/.js 无需手动登记（但需重新 cmake configure）。
 # 模块 URI 保持 "MinecraftServerManager"（现有所有 QML `import` 与 C++ `loadFromModule`
 # 均据此引用），仅构建目标名改为 HMCSM-GUI-Local，不影响界面代码。
-file(GLOB QML_SOURCES CONFIGURE_DEPENDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-    qml/*.qml
-    qml/*.js
+#
+# 关键：每个 QML 文件必须以「纯文件名」作为资源别名落到模块根目录，否则会带 qml/ 前缀，
+# 导致 loadFromModule("MinecraftServerManager", "MainWindow") 在
+# qrc:/MinecraftServerManager/MainWindow.qml 找不到实际位于 qml/ 子目录的文件；
+# RESOURCE_PREFIX 显式固定为 /MinecraftServerManager，与 loadFromModule 解析路径一致。
+file(GLOB QML_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/qml/*.qml
+    ${CMAKE_CURRENT_SOURCE_DIR}/qml/*.js
 )
+foreach(hmcsm_qml ${QML_SOURCES})
+    get_filename_component(hmcsm_qml_name ${hmcsm_qml} NAME)
+    set_source_files_properties(${hmcsm_qml} PROPERTIES QT_RESOURCE_ALIAS ${hmcsm_qml_name})
+endforeach()
 qt_add_qml_module(HMCSM-GUI-Local
     URI MinecraftServerManager
     VERSION 1.0
+    RESOURCE_PREFIX /
     QML_FILES
         ${QML_SOURCES}
     RESOURCES
